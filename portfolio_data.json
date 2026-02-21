@@ -1,0 +1,15 @@
+{
+  "PPX.MU": {
+    "ticker": "PPX.MU",
+    "name": "Kering SA",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-10-15",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 226.89
+      }
+    ]
+  }
+}
