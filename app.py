@@ -399,15 +399,14 @@ def render_holdings():
     col_xl, col_csv, _ = st.columns([1, 1, 4])
 
     with col_xl:
-        import tempfile, os
+        # Write xlsx to an in-memory buffer so Streamlit can serve it as a download
+        # io.BytesIO() creates a file-like object in RAM — no disk write needed
         buf = io.BytesIO()
         fname = f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp_path = tmp.name
+        tmp_path = f"/tmp/{fname}"
         exporter.export_to_excel(holdings, prices, filename=tmp_path)
         with open(tmp_path, "rb") as f:
             buf.write(f.read())
-        os.unlink(tmp_path)
         buf.seek(0)
         st.download_button(
             "⬇  Download Excel",
@@ -464,25 +463,71 @@ def render_holdings():
             )
             _render_price_history(h.ticker, period_map[period_choice], h.transactions)
 
-            # ── Transaction history table ──
-            t_rows = [{"Date": t.date, "Action": t.action.upper(),
-                       "Quantity": t.quantity, "Price": t.price,
-                       "Total": round(t.total_cost, 2)} for t in h.transactions]
-            t_df = pd.DataFrame(t_rows)
+            # ── Editable transaction table ──
+            # st.data_editor renders a table the user can edit directly in the browser.
+            # We build a DataFrame from the transactions, let the user edit it,
+            # then compare the result to the original to detect changes.
+            st.markdown('<p class="section-title">Transactions  (click a cell to edit)</p>',
+                        unsafe_allow_html=True)
 
-            def colour_action(val):
-                return f"color:{GAIN}" if val == "BUY" else f"color:{LOSS}"
+            t_rows = [
+                {
+                    "Date":     t.date,
+                    "Action":   t.action.lower(),
+                    "Quantity": t.quantity,
+                    "Price":    t.price,
+                }
+                for t in h.transactions
+            ]
+            original_df = pd.DataFrame(t_rows)
 
-            st.dataframe(
-                t_df.style.applymap(colour_action, subset=["Action"])
-                    .format({"Price": "€{:.4f}", "Total": "€{:,.2f}"}),
-                use_container_width=True, hide_index=True,
+            edited_df = st.data_editor(
+                original_df,
+                key=f"editor_{h.ticker}",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Date": st.column_config.TextColumn(
+                        "Date", help="Format: YYYY-MM-DD", width="small",
+                    ),
+                    "Action": st.column_config.SelectboxColumn(
+                        "Action", options=["buy", "sell"], width="small",
+                    ),
+                    "Quantity": st.column_config.NumberColumn(
+                        "Quantity", min_value=0.0001, format="%.4f", width="small",
+                    ),
+                    "Price": st.column_config.NumberColumn(
+                        "Price (€)", min_value=0.0001, format="€%.4f", width="small",
+                    ),
+                },
+                num_rows="fixed",
             )
 
-            if st.button(f"🗑  Remove {h.ticker}", key=f"remove_{h.ticker}"):
-                portfolio().remove_holding(h.ticker)
-                st.session_state.prices = {}
-                st.rerun()
+            # Show save button only when something has changed
+            if not edited_df.equals(original_df):
+                if st.button(f"💾  Save changes to {h.ticker}",
+                             key=f"save_{h.ticker}", type="primary"):
+                    from tracker.portfolio import Transaction
+                    portfolio().holdings[h.ticker].transactions = [
+                        Transaction(
+                            date=str(row["Date"]).strip(),
+                            action=str(row["Action"]).lower().strip(),
+                            quantity=float(row["Quantity"]),
+                            price=float(row["Price"]),
+                        )
+                        for _, row in edited_df.iterrows()
+                    ]
+                    portfolio().save()
+                    st.session_state.prices = {}
+                    st.success(f"✓ Transactions updated for {h.ticker}")
+                    st.rerun()
+
+            col_del, _ = st.columns([1, 4])
+            with col_del:
+                if st.button(f"🗑  Remove {h.ticker}", key=f"remove_{h.ticker}"):
+                    portfolio().remove_holding(h.ticker)
+                    st.session_state.prices = {}
+                    st.rerun()
 
 
 def _render_price_history(ticker: str, period: str, transactions=None) -> None:

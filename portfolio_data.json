@@ -11,5 +11,18 @@
         "price": 226.89
       }
     ]
+  },
+  "NLM.F": {
+    "ticker": "NLM.F",
+    "name": "Frosta AG",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2025-02-10",
+        "action": "buy",
+        "quantity": 2.0,
+        "price": 148.99
+      }
+    ]
   }
 }
