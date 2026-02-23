@@ -399,14 +399,15 @@ def render_holdings():
     col_xl, col_csv, _ = st.columns([1, 1, 4])
 
     with col_xl:
-        # Write xlsx to an in-memory buffer so Streamlit can serve it as a download
-        # io.BytesIO() creates a file-like object in RAM — no disk write needed
+        import tempfile, os
         buf = io.BytesIO()
         fname = f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        tmp_path = f"/tmp/{fname}"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp_path = tmp.name
         exporter.export_to_excel(holdings, prices, filename=tmp_path)
         with open(tmp_path, "rb") as f:
             buf.write(f.read())
+        os.unlink(tmp_path)
         buf.seek(0)
         st.download_button(
             "⬇  Download Excel",
