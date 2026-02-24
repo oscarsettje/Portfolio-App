@@ -1,154 +1,120 @@
 """
-tracker/portfolio.py
-====================
-Core data model. Handles holdings storage and persistence to JSON.
+tracker/portfolio.py  —  Core data model
 
-Key concepts introduced here:
-  - dataclasses  : a clean way to define data-holding objects
-  - JSON         : a simple text format for saving/loading data
-  - datetime     : working with dates and times
-  - List / Dict  : Python type hints for readability
+Key concepts:
+  - dataclasses   : clean data-holding objects with auto-generated __init__
+  - JSON          : simple text format for saving/loading data
+  - @property     : computed attributes that look like regular fields
 """
 
-import json
-import os
+import json, os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 
-
-# ---------------------------------------------------------------------------
-# Data Classes
-# A @dataclass automatically creates __init__, __repr__ etc. for you.
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Transaction:
-    """Represents a single buy or sell transaction."""
-    date: str           # ISO format: "2024-01-15"
-    action: str         # "buy" or "sell"
-    quantity: float     # Number of shares / coins
-    price: float        # Price paid per unit
+    date: str       # ISO format: "2024-01-15"
+    action: str     # "buy" or "sell"
+    quantity: float
+    price: float
 
     @property
     def total_cost(self) -> float:
-        """Total value of this transaction."""
         return self.quantity * self.price
 
 
 @dataclass
 class Holding:
-    """
-    Represents one position in the portfolio.
-    A position is built up from one or more transactions.
-    """
-    ticker: str                         # e.g. "AAPL", "BTC-USD", "SPY"
-    name: str                           # e.g. "Apple Inc."
-    asset_type: str                     # "stock", "crypto", or "etf"
+    ticker: str
+    name: str
+    asset_type: str         # "stock", "crypto", or "etf"
     transactions: List[Transaction] = field(default_factory=list)
-
-    # --- Computed properties (calculated on the fly, not stored) ---
+    manual_price: Optional[float] = None   # ← NEW: user-set price override
 
     @property
     def quantity(self) -> float:
-        """Net shares/coins owned (buys minus sells)."""
         total = 0.0
         for t in self.transactions:
-            if t.action == "buy":
-                total += t.quantity
-            elif t.action == "sell":
-                total -= t.quantity
+            total += t.quantity if t.action == "buy" else -t.quantity
         return total
 
     @property
     def average_cost(self) -> float:
-        """
-        Average cost basis per unit using a running weighted average.
-        This is the standard method brokers use.
-        """
-        total_cost = 0.0
-        total_qty = 0.0
+        total_cost = total_qty = 0.0
         for t in self.transactions:
             if t.action == "buy":
                 total_cost += t.quantity * t.price
-                total_qty += t.quantity
+                total_qty  += t.quantity
             elif t.action == "sell" and total_qty > 0:
-                # Reduce cost basis proportionally on sells
-                sell_ratio = t.quantity / total_qty
-                total_cost -= total_cost * sell_ratio
-                total_qty -= t.quantity
-        if total_qty == 0:
-            return 0.0
-        return total_cost / total_qty
+                total_cost -= total_cost * (t.quantity / total_qty)
+                total_qty  -= t.quantity
+        return total_cost / total_qty if total_qty else 0.0
 
     @property
     def total_invested(self) -> float:
-        """Sum of all buy transactions."""
         return sum(t.total_cost for t in self.transactions if t.action == "buy")
 
-    def current_value(self, current_price: float) -> float:
-        """Market value at the given current price."""
-        return self.quantity * current_price
+    def current_value(self, price: float) -> float:
+        return self.quantity * price
 
-    def unrealised_pnl(self, current_price: float) -> float:
-        """Profit or loss compared to average cost."""
-        return (current_price - self.average_cost) * self.quantity
+    def unrealised_pnl(self, price: float) -> float:
+        return (price - self.average_cost) * self.quantity
 
-    def pnl_percent(self, current_price: float) -> float:
-        """Percentage gain/loss vs average cost."""
-        if self.average_cost == 0:
-            return 0.0
-        return ((current_price - self.average_cost) / self.average_cost) * 100
+    def pnl_percent(self, price: float) -> float:
+        return ((price - self.average_cost) / self.average_cost * 100
+                if self.average_cost else 0.0)
+
+
+@dataclass
+class Snapshot:
+    """
+    A point-in-time record of total portfolio value.
+    Saved manually by the user to track value over time.
+
+    Key concept: @dataclass gives us __init__, __repr__ etc. for free,
+    and asdict() lets us serialise it to JSON with one call.
+    """
+    date:            str    # "2024-01-15"
+    total_value:     float
+    total_invested:  float
+    note:            str = ""
+
+    @property
+    def pnl(self) -> float:
+        return self.total_value - self.total_invested
+
+    @property
+    def pnl_pct(self) -> float:
+        return (self.pnl / self.total_invested * 100) if self.total_invested else 0.0
 
 
 class Portfolio:
-    """
-    The top-level portfolio object.
-    Manages a collection of holdings and handles saving/loading from disk.
-    """
-
-    DATA_FILE = "portfolio_data.json"
+    DATA_FILE      = "portfolio_data.json"
+    SNAPSHOT_FILE  = "portfolio_snapshots.json"
 
     def __init__(self):
-        # A dict mapping ticker -> Holding for fast lookup
-        self.holdings: dict[str, Holding] = {}
+        self.holdings:  Dict[str, Holding]  = {}
+        self.snapshots: List[Snapshot]      = []
         self.load()
 
-    # -----------------------------------------------------------------------
-    # CRUD operations
-    # -----------------------------------------------------------------------
+    # ── Holdings CRUD ─────────────────────────────────────────────────────────
 
-    def add_transaction(
-        self,
-        ticker: str,
-        name: str,
-        asset_type: str,
-        action: str,
-        quantity: float,
-        price: float,
-        date: Optional[str] = None,
-    ) -> None:
-        """Add a buy or sell transaction for a ticker."""
+    def add_transaction(self, ticker: str, name: str, asset_type: str,
+                        action: str, quantity: float, price: float,
+                        date: Optional[str] = None) -> None:
         if date is None:
             date = datetime.today().strftime("%Y-%m-%d")
-
-        transaction = Transaction(date=date, action=action, quantity=quantity, price=price)
-
         ticker = ticker.upper()
         if ticker not in self.holdings:
-            # First time we're seeing this ticker — create a new Holding
-            self.holdings[ticker] = Holding(
-                ticker=ticker,
-                name=name,
-                asset_type=asset_type.lower(),
-                transactions=[],
-            )
-
-        self.holdings[ticker].transactions.append(transaction)
+            self.holdings[ticker] = Holding(ticker=ticker, name=name,
+                                            asset_type=asset_type.lower())
+        self.holdings[ticker].transactions.append(
+            Transaction(date=date, action=action, quantity=quantity, price=price))
         self.save()
 
     def remove_holding(self, ticker: str) -> bool:
-        """Delete all data for a ticker. Returns True if found."""
         ticker = ticker.upper()
         if ticker in self.holdings:
             del self.holdings[ticker]
@@ -156,42 +122,64 @@ class Portfolio:
             return True
         return False
 
+    def set_manual_price(self, ticker: str, price: Optional[float]) -> None:
+        """Set or clear a manual price override for a ticker."""
+        ticker = ticker.upper()
+        if ticker in self.holdings:
+            self.holdings[ticker].manual_price = price
+            self.save()
+
     def get_holding(self, ticker: str) -> Optional[Holding]:
         return self.holdings.get(ticker.upper())
 
     def all_holdings(self) -> List[Holding]:
-        """Return only positions where the net quantity is positive."""
         return [h for h in self.holdings.values() if h.quantity > 0]
 
-    # -----------------------------------------------------------------------
-    # Persistence — saving and loading from JSON
-    # -----------------------------------------------------------------------
+    # ── Snapshots ─────────────────────────────────────────────────────────────
+
+    def add_snapshot(self, total_value: float, total_invested: float,
+                     note: str = "") -> Snapshot:
+        """Record current portfolio value as a snapshot."""
+        snap = Snapshot(
+            date=datetime.today().strftime("%Y-%m-%d"),
+            total_value=round(total_value, 2),
+            total_invested=round(total_invested, 2),
+            note=note,
+        )
+        self.snapshots.append(snap)
+        self.save_snapshots()
+        return snap
+
+    def delete_snapshot(self, index: int) -> None:
+        if 0 <= index < len(self.snapshots):
+            self.snapshots.pop(index)
+            self.save_snapshots()
+
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self) -> None:
-        """
-        Serialize the portfolio to JSON and write to disk.
-        `asdict()` converts a dataclass (and nested dataclasses) to a plain dict.
-        """
-        data = {ticker: asdict(holding) for ticker, holding in self.holdings.items()}
+        data = {ticker: asdict(h) for ticker, h in self.holdings.items()}
         with open(self.DATA_FILE, "w") as f:
             json.dump(data, f, indent=2)
 
     def load(self) -> None:
-        """Load portfolio from JSON, or start fresh if no file exists."""
-        if not os.path.exists(self.DATA_FILE):
-            return  # Nothing to load — brand new portfolio
+        if os.path.exists(self.DATA_FILE):
+            with open(self.DATA_FILE) as f:
+                data = json.load(f)
+            for ticker, d in data.items():
+                transactions = [Transaction(**t) for t in d.get("transactions", [])]
+                self.holdings[ticker] = Holding(
+                    ticker=d["ticker"], name=d["name"], asset_type=d["asset_type"],
+                    transactions=transactions,
+                    manual_price=d.get("manual_price"),   # backward-compatible
+                )
+        self.load_snapshots()
 
-        with open(self.DATA_FILE, "r") as f:
-            data = json.load(f)
+    def save_snapshots(self) -> None:
+        with open(self.SNAPSHOT_FILE, "w") as f:
+            json.dump([asdict(s) for s in self.snapshots], f, indent=2)
 
-        for ticker, holding_dict in data.items():
-            # Re-create Transaction objects from the plain dicts
-            transactions = [
-                Transaction(**t) for t in holding_dict.get("transactions", [])
-            ]
-            self.holdings[ticker] = Holding(
-                ticker=holding_dict["ticker"],
-                name=holding_dict["name"],
-                asset_type=holding_dict["asset_type"],
-                transactions=transactions,
-            )
+    def load_snapshots(self) -> None:
+        if os.path.exists(self.SNAPSHOT_FILE):
+            with open(self.SNAPSHOT_FILE) as f:
+                self.snapshots = [Snapshot(**s) for s in json.load(f)]

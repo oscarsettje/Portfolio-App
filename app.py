@@ -63,10 +63,15 @@ def fetcher()   -> PriceFetcher: return st.session_state.fetcher
 # ── Prices ────────────────────────────────────────────────────────────────────
 def get_prices() -> Dict[str, Optional[float]]:
     if not st.session_state.prices:
-        tickers = [h.ticker for h in portfolio().all_holdings()]
+        holdings = portfolio().all_holdings()
+        tickers  = [h.ticker for h in holdings if not h.manual_price]
         if tickers:
             with st.spinner("Fetching live prices…"):
                 st.session_state.prices = fetcher().get_prices(tickers)
+        # Merge manual price overrides — they always take priority
+        for h in holdings:
+            if h.manual_price is not None:
+                st.session_state.prices[h.ticker] = h.manual_price
     return st.session_state.prices
 
 def invalidate_prices():
@@ -152,7 +157,7 @@ def render_sidebar():
         st.markdown("## 📈 Portfolio Tracker")
         st.divider()
         page = st.radio("Nav", ["Dashboard","Holdings","Add Transaction",
-                                "Benchmark","Covariance Matrix"],
+                                "Benchmark","Covariance Matrix","Snapshot History"],
                         label_visibility="collapsed")
         st.divider()
         holdings = portfolio().all_holdings()
@@ -291,30 +296,56 @@ def render_holdings():
     st.divider()
     st.markdown('<p class="section-title">Holding Detail</p>', unsafe_allow_html=True)
     for h in holdings:
-        with st.expander(f"{h.ticker}  —  {h.name}"):
+        manual_tag = "  🔧" if h.manual_price else ""
+        with st.expander(f"{h.ticker}  —  {h.name}{manual_tag}"):
             p = prices.get(h.ticker)
+
+            # ── Manual price override ──
+            st.markdown('<p class="section-title">Price Override</p>', unsafe_allow_html=True)
+            st.caption("Use this if Yahoo Finance doesn't support this ticker.")
+            oc1, oc2, oc3 = st.columns([1, 1, 2])
+            with oc1:
+                manual_val = st.number_input(
+                    "Manual price (€)", min_value=0.0, value=float(h.manual_price or 0),
+                    format="%.4f", key=f"manual_input_{h.ticker}",
+                    help="Set to 0 to remove override and use live price")
+            with oc2:
+                st.write("")
+                st.write("")
+                if st.button("Set price", key=f"set_price_{h.ticker}"):
+                    override = manual_val if manual_val > 0 else None
+                    portfolio().set_manual_price(h.ticker, override)
+                    invalidate_prices()
+                    label = fmt_cur(override) if override else "live price"
+                    st.success(f"✓ Price set to {label}"); st.rerun()
+
+            st.divider()
+
+            # ── Metrics ──
             m1,m2,m3,m4 = st.columns(4)
             m1.metric("Avg Cost",      fmt_cur(h.average_cost))
-            m2.metric("Current Price", fmt_cur(p) if p else "—")
+            m2.metric("Current Price", (fmt_cur(p) + (" 🔧" if h.manual_price else "")) if p else "—")
             m3.metric("Market Value",  fmt_cur(h.current_value(p)) if p else "—")
             if p:
                 m4.metric("P&L", fmt_cur(h.unrealised_pnl(p)), delta=fmt_pct(h.pnl_percent(p)))
 
-            # Price history
+            # ── Price history ──
             period_map = {"1M":"1mo","3M":"3mo","6M":"6mo","1Y":"1y","3Y":"3y","5Y":"5y"}
             period = st.radio("Period", list(period_map.keys()),
                               horizontal=True, key=f"period_{h.ticker}")
             _chart_price_history(h.ticker, period_map[period], h.transactions)
 
-            # Editable transaction table
-            st.markdown('<p class="section-title">Transactions  (click a cell to edit)</p>',
+            # ── Editable transaction table with per-row delete ──
+            st.markdown('<p class="section-title">Transactions  (click a cell to edit, ✕ to delete)</p>',
                         unsafe_allow_html=True)
             original_df = pd.DataFrame([{"Date":t.date,"Action":t.action.lower(),
                                           "Quantity":t.quantity,"Price":t.price}
                                          for t in h.transactions])
             edited_df = st.data_editor(
                 original_df, key=f"editor_{h.ticker}",
-                use_container_width=True, hide_index=True, num_rows="fixed",
+                use_container_width=True, hide_index=True,
+                # num_rows="dynamic" allows the user to delete rows with the ✕ button
+                num_rows="dynamic",
                 column_config={
                     "Date":     st.column_config.TextColumn("Date", help="YYYY-MM-DD", width="small"),
                     "Action":   st.column_config.SelectboxColumn("Action", options=["buy","sell"], width="small"),
@@ -329,7 +360,7 @@ def render_holdings():
                                     action=str(r["Action"]).lower().strip(),
                                     quantity=float(r["Quantity"]),
                                     price=float(r["Price"]))
-                        for _, r in edited_df.iterrows()
+                        for _, r in edited_df.dropna(subset=["Date","Action","Quantity","Price"]).iterrows()
                     ]
                     portfolio().save()
                     invalidate_prices()
@@ -612,6 +643,99 @@ def _render_heatmap(matrix, fmt, zmin=None, zmax=None, zmid=None):
                       font_size=11, margin=dict(t=10,b=10,l=10,r=10), height=350)
     st.plotly_chart(fig, use_container_width=True)
 
+# ── Snapshot History ──────────────────────────────────────────────────────────
+def render_snapshot_history():
+    """
+    Let the user manually record the portfolio value at a point in time,
+    then plot all snapshots as a line chart to show value growth over time.
+
+    Why manual? Because we don't have a database running 24/7 to auto-record.
+    The user clicks "Save Snapshot" whenever they want to log the current value.
+    """
+    st.markdown("## Snapshot History")
+    st.caption("Manually record your portfolio value over time to track growth.")
+
+    holdings = portfolio().all_holdings()
+    prices   = get_prices()
+    tv  = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
+    ti  = sum(h.total_invested for h in holdings)
+
+    # ── Save a new snapshot ──
+    st.markdown('<p class="section-title">Record Today's Value</p>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c1:
+        st.metric("Current Value", fmt_cur(tv))
+    with c2:
+        note = st.text_input("Note (optional)", placeholder="e.g. After Q1 rebalance")
+    with c3:
+        st.write("")
+        st.write("")
+        if st.button("📸  Save Snapshot", type="primary", use_container_width=True):
+            if tv == 0:
+                st.warning("Portfolio value is €0 — check prices are loaded.")
+            else:
+                snap = portfolio().add_snapshot(tv, ti, note)
+                st.success(f"✓ Snapshot saved: {fmt_cur(snap.total_value)} on {snap.date}")
+                st.rerun()
+
+    st.divider()
+
+    snaps = portfolio().snapshots
+    if not snaps:
+        st.info("No snapshots yet. Click **Save Snapshot** above to record your first one.")
+        return
+
+    # ── Value over time chart ──
+    st.markdown('<p class="section-title">Portfolio Value Over Time</p>', unsafe_allow_html=True)
+    df = pd.DataFrame([{
+        "Date":     s.date,
+        "Value":    s.total_value,
+        "Invested": s.total_invested,
+        "P&L":      s.pnl,
+    } for s in snaps]).sort_values("Date")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["Value"], name="Portfolio Value",
+        line=dict(color=BLUE, width=2.5), mode="lines+markers",
+        hovertemplate="<b>%{x}</b><br>Value: €%{y:,.2f}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["Invested"], name="Total Invested",
+        line=dict(color="#888", width=1.5, dash="dot"), mode="lines+markers",
+        hovertemplate="<b>%{x}</b><br>Invested: €%{y:,.2f}<extra></extra>"))
+    fig.update_layout(**_chart_layout("Portfolio Value Over Time", 380))
+    fig.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # P&L chart
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(x=df["Date"], y=df["P&L"], name="P&L",
+        marker_color=[GAIN if v >= 0 else LOSS for v in df["P&L"]],
+        hovertemplate="<b>%{x}</b><br>P&L: €%{y:+,.2f}<extra></extra>"))
+    fig2.add_hline(y=0, line_color="#333", line_dash="dash", line_width=1)
+    fig2.update_layout(**_chart_layout("Unrealised P&L at Each Snapshot", 260))
+    fig2.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Snapshot table with delete buttons ──
+    st.divider()
+    st.markdown('<p class="section-title">All Snapshots</p>', unsafe_allow_html=True)
+    for i, s in enumerate(reversed(snaps)):
+        real_idx = len(snaps) - 1 - i   # index into original list
+        pnl_col  = GAIN if s.pnl >= 0 else LOSS
+        col_date, col_val, col_inv, col_pnl, col_note, col_del = st.columns([1,1,1,1,2,0.5])
+        col_date.caption("Date");     col_date.write(s.date)
+        col_val.caption("Value");     col_val.write(fmt_cur(s.total_value))
+        col_inv.caption("Invested");  col_inv.write(fmt_cur(s.total_invested))
+        col_pnl.caption("P&L");
+        col_pnl.markdown(f'<span style="color:{pnl_col}">{fmt_cur(s.pnl)} ({fmt_pct(s.pnl_pct)})</span>',
+                         unsafe_allow_html=True)
+        col_note.caption("Note");     col_note.write(s.note or "—")
+        with col_del:
+            st.write("")
+            if st.button("✕", key=f"del_snap_{real_idx}", help="Delete this snapshot"):
+                portfolio().delete_snapshot(real_idx)
+                st.rerun()
+
+
 # ── Router ────────────────────────────────────────────────────────────────────
 def main():
     page = render_sidebar()
@@ -619,7 +743,8 @@ def main():
      "Holdings":         render_holdings,
      "Add Transaction":  render_add_transaction,
      "Benchmark":        render_benchmark,
-     "Covariance Matrix":render_covariance}.get(page, render_dashboard)()
+     "Covariance Matrix":render_covariance,
+     "Snapshot History": render_snapshot_history}.get(page, render_dashboard)()
 
 if __name__ == "__main__":
     main()
