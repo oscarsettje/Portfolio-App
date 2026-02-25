@@ -60,7 +60,8 @@ if "portfolio"    not in st.session_state: st.session_state.portfolio    = Portf
 if "fetcher"      not in st.session_state: st.session_state.fetcher      = PriceFetcher()
 if "prices"       not in st.session_state: st.session_state.prices       = {}
 if "news_cache"   not in st.session_state: st.session_state.news_cache   = {}
-if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
+if "sector_cache"   not in st.session_state: st.session_state.sector_cache   = {}
+if "stale_prices"   not in st.session_state: st.session_state.stale_prices   = set()
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
 def fetcher()   -> PriceFetcher: return st.session_state.fetcher
@@ -73,6 +74,13 @@ def get_prices() -> Dict[str, Optional[float]]:
         if tickers:
             with st.spinner("Fetching live prices…"):
                 st.session_state.prices = fetcher().get_prices(tickers)
+            # Track which tickers are using cached (stale) prices
+            fresh = fetcher()._cache
+            st.session_state.stale_prices = {
+                t for t in tickers
+                if t not in fresh or fresh.get(t) == fetcher()._disk.get(t)
+                   and t in fetcher()._disk
+            }
         for h in holdings:
             if h.manual_price is not None:
                 st.session_state.prices[h.ticker] = h.manual_price
@@ -189,6 +197,9 @@ def render_sidebar():
         st.divider()
         if st.button("🔄  Refresh Prices", use_container_width=True):
             invalidate_prices(); st.rerun()
+        stale = st.session_state.get("stale_prices", set())
+        if stale:
+            st.warning(f"⚠️ Cached prices in use for: {', '.join(sorted(stale))}\n\nYahoo Finance may be rate-limiting. Try refreshing later.")
     return page
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
