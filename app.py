@@ -829,22 +829,7 @@ def render_snapshot_history():
                 portfolio().delete_snapshot(real_idx); st.rerun()
 
 # ── Router ────────────────────────────────────────────────────────────────────
-def main():
-    page = render_sidebar()
-    {
-        "Dashboard":          render_dashboard,
-        "Holdings":           render_holdings,
-        "Add Transaction":    render_add_transaction,
-        "Benchmark":          render_benchmark,
-        "Portfolio Analysis": render_analysis,
-        "Snapshot History":   render_snapshot_history,
-        "Quant Metrics":      render_quant,
-    }.get(page, render_dashboard)()
 
-if __name__ == "__main__":
-    main()
-
-# ── Quant Metrics ─────────────────────────────────────────────────────────────
 def render_quant():
     from tracker.quant import (
         fetch_weekly_returns, sharpe_ratio, sortino_ratio, beta_and_alpha,
@@ -1132,3 +1117,20 @@ def render_quant():
 def _WEEKLY_SCALE(annual_rf: float) -> float:
     """Convert annual risk-free rate to weekly."""
     return (1 + annual_rf) ** (1 / 52) - 1
+
+def main():
+    page = render_sidebar()
+    {
+        "Dashboard":          render_dashboard,
+        "Holdings":           render_holdings,
+        "Add Transaction":    render_add_transaction,
+        "Benchmark":          render_benchmark,
+        "Portfolio Analysis": render_analysis,
+        "Snapshot History":   render_snapshot_history,
+        "Quant Metrics":      render_quant,
+    }.get(page, render_dashboard)()
+
+if __name__ == "__main__":
+    main()
+
+# ── Quant Metrics ─────────────────────────────────────────────────────────────
