@@ -179,7 +179,7 @@ def _render_news(tickers: List[str]):
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 PAGES = ["Dashboard","Holdings","Add Transaction",
-         "Benchmark","Portfolio Analysis","Snapshot History"]
+         "Benchmark","Portfolio Analysis","Quant Metrics","Snapshot History"]
 
 def render_sidebar():
     with st.sidebar:
@@ -838,7 +838,297 @@ def main():
         "Benchmark":          render_benchmark,
         "Portfolio Analysis": render_analysis,
         "Snapshot History":   render_snapshot_history,
+        "Quant Metrics":      render_quant,
     }.get(page, render_dashboard)()
 
 if __name__ == "__main__":
     main()
+
+# ── Quant Metrics ─────────────────────────────────────────────────────────────
+def render_quant():
+    from tracker.quant import (
+        fetch_weekly_returns, sharpe_ratio, sortino_ratio, beta_and_alpha,
+        max_drawdown, calmar_ratio, value_at_risk, cvar,
+        rolling_sharpe, rolling_sortino, rolling_beta,
+        compute_full_metrics, RISK_FREE_ANNUAL, WEEKS_PER_YEAR,
+    )
+    from tracker.benchmark import (
+        build_portfolio_value_series, get_portfolio_start_date, INDICES,
+    )
+
+    st.markdown("## Quant Metrics")
+    st.caption("Advanced portfolio statistics based on weekly returns · benchmark-relative measures use S&P 500 by default")
+
+    port     = portfolio()
+    holdings = port.all_holdings()
+    if not holdings:
+        st.info("Add some holdings first."); return
+
+    start_date = get_portfolio_start_date(port)
+    if start_date is None:
+        st.info("Add some transactions first."); return
+
+    # ── Controls ──
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        period = st.selectbox("Data period", ["1Y","2Y","3Y","5Y"], index=1)
+    with col2:
+        bench_name = st.selectbox("Benchmark", list(INDICES.keys()), index=1)
+    with col3:
+        roll_window = st.selectbox("Rolling window", ["26 weeks (6M)","52 weeks (1Y)","104 weeks (2Y)"], index=1)
+    window = int(roll_window.split()[0])
+    rf_pct = st.number_input("Risk-free rate (% annual, e.g. ECB rate)",
+                              min_value=0.0, max_value=20.0,
+                              value=float(RISK_FREE_ANNUAL * 100), step=0.25,
+                              format="%.2f") / 100
+
+    period_map = {"1Y":"1y","2Y":"2y","3Y":"3y","5Y":"5y"}
+    if not st.button("Compute Metrics", type="primary"):
+        return
+
+    bench_ticker = INDICES[bench_name]
+    all_tickers  = [h.ticker for h in holdings] + [bench_ticker]
+
+    with st.spinner("Downloading weekly price data…"):
+        returns_df = fetch_weekly_returns(all_tickers, period_map[period])
+
+    if returns_df is None or returns_df.empty:
+        st.error("Could not download price data. Try refreshing prices first."); return
+
+    # Build portfolio weekly returns (value-weighted)
+    prices   = get_prices()
+    weights  = {}
+    tv       = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
+    for h in holdings:
+        p = prices.get(h.ticker)
+        if p: weights[h.ticker.upper()] = h.current_value(p) / tv if tv else 0
+
+    # Weighted portfolio return series
+    cols_available = [t for t in weights if t in returns_df.columns]
+    if not cols_available:
+        st.error("No matching ticker data found."); return
+
+    w_arr = np.array([weights[t] for t in cols_available])
+    w_arr = w_arr / w_arr.sum()  # renormalise in case some tickers had no data
+    port_returns  = returns_df[cols_available].dot(w_arr)
+    port_returns.name = "Portfolio"
+
+    bench_col = bench_ticker.upper()
+    if bench_col not in returns_df.columns:
+        st.error(f"Could not load benchmark data for {bench_ticker}."); return
+    bench_returns = returns_df[bench_col]
+    bench_returns.name = bench_name
+
+    # Align
+    aligned = pd.concat([port_returns, bench_returns], axis=1).dropna()
+    port_r  = aligned.iloc[:, 0]
+    bench_r = aligned.iloc[:, 1]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Headline metrics scorecard
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 📋  Metrics Scorecard")
+
+    metrics = compute_full_metrics(port_r, bench_r, "Portfolio", bench_name)
+    raw     = metrics["_raw"]
+
+    # Headline cards — most important metrics at a glance
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("Sharpe Ratio",   f"{raw['sharpe']:.2f}",
+              help="Excess return per unit of total risk. >1 = good, >2 = excellent.")
+    m2.metric("Sortino Ratio",  f"{raw['sortino']:.2f}",
+              help="Like Sharpe but only penalises downside volatility.")
+    m3.metric("Jensen's Alpha", f"{raw['alpha']:+.2%}",
+              help="Annualised outperformance above CAPM expectation. Positive = outperforming.")
+    m4.metric("Beta",           f"{raw['beta']:.2f}",
+              help="Sensitivity to benchmark. 1.0 = moves with market, <1 = defensive.")
+
+    m5,m6,m7,m8 = st.columns(4)
+    m5.metric("Max Drawdown",     f"{raw['mdd']:.2%}",
+              help="Worst peak-to-trough decline over the period.")
+    m6.metric("Calmar Ratio",     f"{raw['calmar']:.2f}",
+              help="Annualised return / max drawdown. Higher = better risk-adjusted return.")
+    m7.metric("VaR (95%)",        f"{raw['var95']:.2%}",
+              help="Weekly loss not exceeded 95% of the time.")
+    m8.metric("CVaR (95%)",       f"{raw['cvar95']:.2%}",
+              help="Average loss in the worst 5% of weeks (Expected Shortfall).")
+
+    # Full comparison table
+    st.divider()
+    _section("Full Metrics Table — Portfolio vs Benchmark")
+
+    # Build benchmark metrics too
+    beta_b, alpha_b = beta_and_alpha(bench_r, bench_r)
+    ann_ret_b = (1 + bench_r.mean()) ** WEEKS_PER_YEAR - 1
+    ann_vol_b = bench_r.std() * np.sqrt(WEEKS_PER_YEAR)
+    mdd_b     = max_drawdown(bench_r)
+
+    table_data = {
+        "Metric": metrics["Metric"],
+        "Portfolio": metrics["Portfolio"],
+        bench_name: [
+            f"{ann_ret_b:+.2%}", f"{ann_vol_b:.2%}",
+            f"{sharpe_ratio(bench_r, rf=rf_pct/_WEEKLY_SCALE(rf_pct)):.2f}",
+            f"{sortino_ratio(bench_r, rf=rf_pct/_WEEKLY_SCALE(rf_pct)):.2f}",
+            "1.00", "—",
+            f"{mdd_b:.2%}",
+            f"{calmar_ratio(bench_r):.2f}",
+            f"{value_at_risk(bench_r, 0.95):.2%}",
+            f"{cvar(bench_r, 0.95):.2%}",
+        ],
+    }
+
+    def _colour_metric(val, metric_name):
+        """Green if the value is 'good', red if 'bad' — direction depends on metric."""
+        try:
+            n = float(str(val).replace("%","").replace("+",""))
+        except Exception:
+            return ""
+        # Metrics where higher = better
+        if any(x in metric_name for x in ["Return","Sharpe","Sortino","Alpha","Calmar"]):
+            return f"color:{GAIN}" if n > 0 else f"color:{LOSS}"
+        # Metrics where less negative = better (drawdown, VaR, CVaR, volatility)
+        if any(x in metric_name for x in ["Drawdown","VaR","CVaR","Volatility"]):
+            return f"color:{GAIN}" if n > -0.05 else f"color:{LOSS}"
+        return ""
+
+    df_table = pd.DataFrame(table_data)
+    styled = df_table.style
+    for col in ["Portfolio", bench_name]:
+        for i, metric in enumerate(df_table["Metric"]):
+            styled = styled.applymap(
+                lambda v, m=metric: _colour_metric(v, m),
+                subset=pd.IndexSlice[i, col]
+            )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Return distribution
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 📊  Return Distribution")
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        _section("Weekly Return Histogram — Portfolio")
+        var95  = value_at_risk(port_r, 0.95)
+        cvar95 = cvar(port_r, 0.95)
+        fig_h = go.Figure()
+        fig_h.add_trace(go.Histogram(
+            x=port_r * 100, nbinsx=40, name="Weekly Returns",
+            marker_color=BLUE, opacity=0.75,
+            hovertemplate="Return: %{x:.2f}%<br>Count: %{y}<extra></extra>"))
+        fig_h.add_vline(x=var95*100,  line_color=LOSS, line_dash="dash", line_width=1.5,
+                        annotation_text=f"VaR 95%: {var95:.2%}", annotation_font_color=LOSS)
+        fig_h.add_vline(x=cvar95*100, line_color="#ff8c00", line_dash="dot", line_width=1.5,
+                        annotation_text=f"CVaR 95%: {cvar95:.2%}", annotation_font_color="#ff8c00")
+        fig_h.update_layout(**_chart_layout(height=320))
+        fig_h.update_layout(xaxis=dict(gridcolor="#1e1e1e", ticksuffix="%"),
+                            yaxis=dict(gridcolor="#1e1e1e"))
+        st.plotly_chart(fig_h, use_container_width=True)
+
+    with col_r:
+        _section("Upside vs Downside Weeks")
+        up   = (port_r > 0).sum()
+        down = (port_r < 0).sum()
+        flat = (port_r == 0).sum()
+        avg_up   = port_r[port_r > 0].mean() * 100 if up > 0 else 0
+        avg_down = port_r[port_r < 0].mean() * 100 if down > 0 else 0
+        fig_ud = go.Figure(go.Bar(
+            x=["Up weeks", "Down weeks", "Flat"],
+            y=[up, down, flat],
+            marker_color=[GAIN, LOSS, "#888"],
+            text=[f"{up}<br>avg {avg_up:+.2f}%",
+                  f"{down}<br>avg {avg_down:+.2f}%",
+                  str(flat)],
+            textposition="auto",
+            hovertemplate="<b>%{x}</b><br>Count: %{y}<extra></extra>"))
+        fig_ud.update_layout(**_chart_layout(height=320))
+        fig_ud.update_layout(yaxis=dict(gridcolor="#1e1e1e"))
+        st.plotly_chart(fig_ud, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Rolling metrics
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown(f"### 📈  Rolling Metrics  ({roll_window})")
+
+    # Rolling Sharpe
+    _section("Rolling Sharpe Ratio")
+    rf_w = (1 + rf_pct) ** (1 / WEEKS_PER_YEAR) - 1
+    r_sharpe_p = rolling_sharpe(port_r,  window, rf=rf_w)
+    r_sharpe_b = rolling_sharpe(bench_r, window, rf=rf_w)
+
+    fig_rs = go.Figure()
+    fig_rs.add_trace(go.Scatter(x=r_sharpe_p.index, y=r_sharpe_p.values,
+        name="Portfolio", line=dict(color=BLUE, width=2),
+        hovertemplate="%{x|%d %b %Y}<br>Sharpe: %{y:.2f}<extra></extra>"))
+    fig_rs.add_trace(go.Scatter(x=r_sharpe_b.index, y=r_sharpe_b.values,
+        name=bench_name, line=dict(color=BENCH_COLOURS.get(bench_name,"#aaa"),
+        width=1.5, dash="dot"),
+        hovertemplate="%{x|%d %b %Y}<br>Sharpe: %{y:.2f}<extra></extra>"))
+    fig_rs.add_hline(y=1, line_color="#4caf7d", line_dash="dot", line_width=1,
+                     annotation_text="Good (1.0)")
+    fig_rs.add_hline(y=0, line_color="#444",    line_dash="dash", line_width=1)
+    fig_rs.update_layout(**_chart_layout(height=300))
+    fig_rs.update_layout(yaxis=dict(gridcolor="#1e1e1e"))
+    st.plotly_chart(fig_rs, use_container_width=True)
+
+    # Rolling Sortino
+    _section("Rolling Sortino Ratio")
+    r_sortino_p = rolling_sortino(port_r,  window, rf=rf_w)
+    r_sortino_b = rolling_sortino(bench_r, window, rf=rf_w)
+
+    fig_rso = go.Figure()
+    fig_rso.add_trace(go.Scatter(x=r_sortino_p.index, y=r_sortino_p.values,
+        name="Portfolio", line=dict(color=BLUE, width=2),
+        hovertemplate="%{x|%d %b %Y}<br>Sortino: %{y:.2f}<extra></extra>"))
+    fig_rso.add_trace(go.Scatter(x=r_sortino_b.index, y=r_sortino_b.values,
+        name=bench_name, line=dict(color=BENCH_COLOURS.get(bench_name,"#aaa"),
+        width=1.5, dash="dot"),
+        hovertemplate="%{x|%d %b %Y}<br>Sortino: %{y:.2f}<extra></extra>"))
+    fig_rso.add_hline(y=0, line_color="#444", line_dash="dash", line_width=1)
+    fig_rso.update_layout(**_chart_layout(height=300))
+    fig_rso.update_layout(yaxis=dict(gridcolor="#1e1e1e"))
+    st.plotly_chart(fig_rso, use_container_width=True)
+
+    # Rolling Beta
+    _section(f"Rolling Beta vs {bench_name}")
+    r_beta = rolling_beta(port_r, bench_r, window)
+
+    fig_rb = go.Figure()
+    fig_rb.add_trace(go.Scatter(x=r_beta.index, y=r_beta.values,
+        name="Beta", line=dict(color="#e8a838", width=2),
+        fill="tozeroy", fillcolor="rgba(232,168,56,0.08)",
+        hovertemplate="%{x|%d %b %Y}<br>Beta: %{y:.2f}<extra></extra>"))
+    fig_rb.add_hline(y=1, line_color="#888", line_dash="dash", line_width=1,
+                     annotation_text="Market (β=1)")
+    fig_rb.add_hline(y=0, line_color="#444", line_dash="dot",  line_width=1)
+    fig_rb.update_layout(**_chart_layout(height=300))
+    fig_rb.update_layout(yaxis=dict(gridcolor="#1e1e1e"))
+    st.plotly_chart(fig_rb, use_container_width=True)
+
+    # Cumulative return comparison
+    st.divider()
+    _section("Cumulative Return — Portfolio vs Benchmark")
+    cum_port  = (1 + port_r).cumprod() - 1
+    cum_bench = (1 + bench_r).cumprod() - 1
+
+    fig_cum = go.Figure()
+    fig_cum.add_trace(go.Scatter(x=cum_port.index, y=cum_port.values * 100,
+        name="Portfolio", line=dict(color=BLUE, width=2.5),
+        hovertemplate="%{x|%d %b %Y}<br>%{y:+.2f}%<extra></extra>"))
+    fig_cum.add_trace(go.Scatter(x=cum_bench.index, y=cum_bench.values * 100,
+        name=bench_name, line=dict(color=BENCH_COLOURS.get(bench_name,"#aaa"),
+        width=1.5, dash="dot"),
+        hovertemplate="%{x|%d %b %Y}<br>%{y:+.2f}%<extra></extra>"))
+    fig_cum.add_hline(y=0, line_color="#333", line_dash="dash", line_width=1)
+    fig_cum.update_layout(**_chart_layout(height=340))
+    fig_cum.update_layout(yaxis=dict(gridcolor="#1e1e1e", ticksuffix="%"))
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+
+def _WEEKLY_SCALE(annual_rf: float) -> float:
+    """Convert annual risk-free rate to weekly."""
+    return (1 + annual_rf) ** (1 / 52) - 1
