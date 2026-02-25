@@ -1,132 +1,81 @@
-# 📊 Portfolio Tracker
+# 📈 Portfolio Tracker
 
-A clean, educational Python portfolio tracker for Stocks, Crypto, and ETFs —
-with live prices, terminal tables, charts, and Excel/CSV export.
-
----
+A personal portfolio tracker built with Python and Streamlit. Track stocks, ETFs and crypto with live prices, performance charts, and portfolio analysis.
 
 ## Features
 
-- **Live prices** via Yahoo Finance (`yfinance`) — no API key needed
-- **Terminal dashboard** with colour-coded P&L (powered by `rich`)
-- **3 chart types**: allocation donut, P&L bar, invested vs value
-- **Excel export** with professional formatting, colour coding, and formulas
-- **CSV export** for use in Google Sheets or other tools
-- **Persistent storage** — your data is saved to `portfolio_data.json` automatically
-- **Tracks**: Stocks, ETFs, and Crypto (anything Yahoo Finance supports)
+| Page | What it does |
+|---|---|
+| **Dashboard** | Overview metrics, allocation chart, P&L bars, news feed |
+| **Holdings** | Full position table, price history charts, editable transactions, Excel/CSV export |
+| **Add Transaction** | Record buys and sells for any stock, ETF or crypto |
+| **Benchmark** | Compare portfolio performance vs MSCI World, S&P 500, NASDAQ, EM indices |
+| **Portfolio Analysis** | Diversification breakdown, correlation matrix, stress testing |
+| **Snapshot History** | Manually record portfolio value over time to track growth |
 
----
+## Setup
+
+**Requirements:** Python 3.10+
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/oscarsettje/Portfolio-App.git
+cd Portfolio-App
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run the app
+streamlit run app.py
+```
+
+The app opens at `http://localhost:8501`.
 
 ## Project Structure
 
 ```
 portfolio_tracker/
-│
-├── main.py                  ← Run this to start the app
-├── requirements.txt         ← Python library dependencies
-├── portfolio_data.json      ← Auto-created; stores your holdings
-│
+├── app.py                      # Streamlit UI — all pages and charts
+├── requirements.txt
+├── portfolio_data.json         # Your holdings (auto-created, gitignored)
+├── portfolio_snapshots.json    # Snapshot history (auto-created, gitignored)
 └── tracker/
-    ├── __init__.py
-    ├── portfolio.py         ← Data model: Holdings, Transactions (dataclasses, JSON)
-    ├── prices.py            ← Live price fetching + caching (yfinance)
-    ├── display.py           ← Terminal output (rich tables, colours)
-    ├── charts.py            ← Charts (matplotlib)
-    ├── exporter.py          ← Excel and CSV export (openpyxl, csv)
-    └── cli.py               ← Interactive menu loop (orchestrates everything)
+    ├── portfolio.py            # Data model: Portfolio, Holding, Transaction, Snapshot
+    ├── prices.py               # Live price fetching via Yahoo Finance
+    ├── benchmark.py            # Portfolio vs index performance calculation
+    ├── analysis.py             # Diversification, correlation, stress testing
+    └── exporter.py             # Excel and CSV export
 ```
 
----
+## Ticker Formats
 
-## Setup
+| Asset | Format | Examples |
+|---|---|---|
+| US stocks / ETFs | Plain ticker | `AAPL`, `MSFT`, `SPY`, `QQQ` |
+| German stocks | `TICKER.DE` | `SIE.DE`, `BMW.DE` |
+| Dutch stocks | `TICKER.AS` | `ASML.AS` |
+| French stocks | `TICKER.PA` | `MC.PA`, `TTE.PA` |
+| UK stocks | `TICKER.L` | `SHEL.L`, `VOD.L` |
+| Crypto | `TICKER-USD` | `BTC-USD`, `ETH-USD`, `SOL-USD` |
 
-### 1. Install Python 3.10+
-Download from https://www.python.org/downloads/
+If a ticker isn't supported by Yahoo Finance, use the **manual price override** in the Holdings page.
 
-### 2. Create a virtual environment (recommended)
-```bash
-python -m venv venv
+## Data Storage
 
-# Activate on Mac/Linux:
-source venv/bin/activate
+All data is saved locally as JSON files. Nothing is sent to any server.
 
-# Activate on Windows:
-venv\Scripts\activate
-```
+- `portfolio_data.json` — your transactions and manual price overrides
+- `portfolio_snapshots.json` — your saved portfolio snapshots
 
-### 3. Install dependencies
-```bash
-pip install -r requirements.txt
-```
+Both files are gitignored by default.
 
-### 4. Run the tracker
-```bash
-python main.py
-```
-
----
-
-## Usage
-
-The app presents a numbered menu:
+## Dependencies
 
 ```
-Portfolio Tracker
-─────────────────────────────────
-  1  View portfolio
-  2  Add BUY transaction
-  3  Add SELL transaction
-  4  View holding detail
-  5  Show charts
-  6  Export (Excel / CSV)
-  7  Remove a holding
-  8  Refresh live prices
-  q  Quit
+streamlit
+yfinance
+plotly
+pandas
+numpy
+openpyxl
 ```
-
-### Adding your first holding
-1. Press `2` (Add BUY)
-2. Enter the **ticker symbol** — e.g.:
-   - `AAPL` (Apple stock)
-   - `BTC-USD` (Bitcoin in USD)
-   - `SPY` (S&P 500 ETF)
-   - `ETH-USD` (Ethereum)
-3. Enter the **full name**, **asset type**, **quantity**, **price paid**, and **date**
-
-Your data is saved automatically.
-
-### Ticker formats
-| Asset        | Yahoo Finance ticker |
-|--------------|----------------------|
-| Apple        | `AAPL`               |
-| Microsoft    | `MSFT`               |
-| Bitcoin      | `BTC-USD`            |
-| Ethereum     | `ETH-USD`            |
-| S&P 500 ETF  | `SPY`                |
-| Nasdaq ETF   | `QQQ`                |
-| Gold ETF     | `GLD`                |
-
-You can look up any ticker at https://finance.yahoo.com
-
----
-
-## Python Concepts Used (Learning Reference)
-
-| File             | Concepts                                               |
-|------------------|--------------------------------------------------------|
-| `portfolio.py`   | `@dataclass`, `@property`, JSON, type hints            |
-| `prices.py`      | External libraries, caching, exception handling         |
-| `display.py`     | f-strings, rich markup, functions, separation of concerns |
-| `charts.py`      | matplotlib, subplots, list comprehensions               |
-| `exporter.py`    | openpyxl, CSV, context managers (`with` statement)     |
-| `cli.py`         | `while` loops, `input()`, `try/except`, class methods  |
-
----
-
-## Extending the project (ideas for next steps)
-
-- Add **price history charts** using `yfinance`'s `.history()` method
-- Track **dividends** by adding a `dividend` transaction type
-- Add a **target allocation** feature to show drift from your desired weights
-- Build a **web UI** using Flask or Streamlit
-- Connect to a **database** (SQLite) instead of JSON for larger portfolios

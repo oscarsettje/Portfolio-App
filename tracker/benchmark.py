@@ -9,7 +9,7 @@ import pandas as pd
 import yfinance as yf
 
 from tracker.portfolio import Portfolio
-from tracker.prices import _extract_close
+from tracker.prices import _close_from_download
 
 INDICES = {
     "MSCI World":         "URTH",
@@ -20,24 +20,13 @@ INDICES = {
 
 
 def _download_close(tickers: list, start: str) -> Optional[pd.DataFrame]:
-    """
-    Download daily close prices and return a clean DataFrame (date x ticker).
-    Handles both old flat and new MultiIndex yfinance output.
-    """
+    """Download daily closes, return clean (date x ticker) DataFrame."""
     try:
         raw = yf.download(tickers, start=start, progress=False, auto_adjust=True)
         if raw.empty:
             return None
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            close = raw.xs("Close", axis=1, level=0)
-        else:
-            close = raw["Close"]
-            if isinstance(close, pd.Series):
-                close = close.to_frame(name=tickers[0].upper())
-
-        close.columns = [str(c).upper() for c in close.columns]
-        close.index   = pd.to_datetime(close.index).tz_localize(None)
+        close = _close_from_download(raw, tickers)
+        close.index = pd.to_datetime(close.index).tz_localize(None)
         return close
     except Exception:
         return None
@@ -90,7 +79,6 @@ def fetch_index_series(ticker: str, start_date: date) -> Optional[pd.Series]:
         return None
     col = ticker.upper()
     if col not in close.columns:
-        # Try first column if ticker naming is off
         col = close.columns[0]
     s = close[col].dropna()
     s.name = ticker

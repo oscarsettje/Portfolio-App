@@ -1,0 +1,14 @@
+# Portfolio data — keep off GitHub
+portfolio_data.json
+portfolio_snapshots.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
