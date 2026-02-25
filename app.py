@@ -661,7 +661,7 @@ def render_snapshot_history():
     ti  = sum(h.total_invested for h in holdings)
 
     # ── Save a new snapshot ──
-    st.markdown('<p class="section-title">Record Today's Value</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Record Today\'s Value</p>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1:
         st.metric("Current Value", fmt_cur(tv))
