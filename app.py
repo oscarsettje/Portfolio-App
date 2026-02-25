@@ -661,7 +661,7 @@ def render_snapshot_history():
     ti  = sum(h.total_invested for h in holdings)
 
     # ── Save a new snapshot ──
-    st.markdown('<p class="section-title">Record Today\'s Value</p>', unsafe_allow_html=True)
+    st.markdown("<p class='section-title'>Record Today's Value</p>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1:
         st.metric("Current Value", fmt_cur(tv))
@@ -736,19 +736,6 @@ def render_snapshot_history():
                 st.rerun()
 
 
-# ── Router ────────────────────────────────────────────────────────────────────
-def main():
-    page = render_sidebar()
-    {"Dashboard":        render_dashboard,
-     "Holdings":         render_holdings,
-     "Add Transaction":  render_add_transaction,
-     "Benchmark":        render_benchmark,
-     "Covariance Matrix":render_covariance,
-     "Snapshot History": render_snapshot_history,
-     "Portfolio Analysis": render_analysis}.get(page, render_dashboard)()
-
-if __name__ == "__main__":
-    main()
 
 # ── Portfolio Analysis ────────────────────────────────────────────────────────
 def render_analysis():
@@ -1025,3 +1012,18 @@ def render_analysis():
                       .format({"Value Now": "€{:,.2f}", "Value After": "€{:,.2f}",
                                "Impact (€)": "€{:+,.2f}", "Impact (%)": "{:+.1f}%"}),
                     use_container_width=True, hide_index=True)
+
+# ── Router ────────────────────────────────────────────────────────────────────
+def main():
+    page = render_sidebar()
+    {"Dashboard":        render_dashboard,
+     "Holdings":         render_holdings,
+     "Add Transaction":  render_add_transaction,
+     "Benchmark":        render_benchmark,
+     "Covariance Matrix":render_covariance,
+     "Snapshot History": render_snapshot_history,
+     "Portfolio Analysis": render_analysis}.get(page, render_dashboard)()
+
+if __name__ == "__main__":
+    main()
+
