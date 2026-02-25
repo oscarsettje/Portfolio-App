@@ -1,20 +1,15 @@
 """
 tracker/benchmark.py  —  Portfolio performance vs market indices
-
-Key concepts:
-  - Time-weighted returns : performance regardless of cash flow timing
-  - Drawdown              : how far below the rolling peak
-  - Sharpe ratio          : return per unit of risk
 """
 
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from tracker.portfolio import Portfolio
+from tracker.prices import _extract_close
 
 INDICES = {
     "MSCI World":         "URTH",
@@ -23,37 +18,41 @@ INDICES = {
     "MSCI Emerging Mkts": "EEM",
 }
 
-# ── Portfolio value series ────────────────────────────────────────────────────
+
+def _download_close(tickers: list, start: str) -> Optional[pd.DataFrame]:
+    """
+    Download daily close prices and return a clean DataFrame (date x ticker).
+    Handles both old flat and new MultiIndex yfinance output.
+    """
+    try:
+        raw = yf.download(tickers, start=start, progress=False, auto_adjust=True)
+        if raw.empty:
+            return None
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw.xs("Close", axis=1, level=0)
+        else:
+            close = raw["Close"]
+            if isinstance(close, pd.Series):
+                close = close.to_frame(name=tickers[0].upper())
+
+        close.columns = [str(c).upper() for c in close.columns]
+        close.index   = pd.to_datetime(close.index).tz_localize(None)
+        return close
+    except Exception:
+        return None
+
+
 def build_portfolio_value_series(portfolio: Portfolio,
                                   start_date: date) -> Optional[pd.Series]:
-    """
-    For each trading day from start_date to today:
-      1. Apply all transactions up to that day to get current positions
-      2. Multiply positions by close prices → portfolio value
-    Returns a pd.Series indexed by date.
-    """
     if not portfolio.all_holdings():
         return None
 
     all_tickers = list(portfolio.holdings.keys())
-
-    try:
-        raw = yf.download(all_tickers, start=start_date.strftime("%Y-%m-%d"),
-                          progress=False, auto_adjust=True)
-    except Exception:
-        return None
-    if raw.empty:
+    close = _download_close(all_tickers, start_date.strftime("%Y-%m-%d"))
+    if close is None:
         return None
 
-    # Normalise close prices DataFrame regardless of single vs multi ticker
-    close = raw["Close"]
-    if isinstance(close, pd.Series):
-        close = close.to_frame(name=all_tickers[0].upper())
-    else:
-        close.columns = [c.upper() for c in close.columns]
-    close.index = pd.to_datetime(close.index).tz_localize(None)
-
-    # Flatten all transactions into a sorted list
     txns: List[Tuple[date, str, str, float]] = sorted(
         [(datetime.strptime(t.date, "%Y-%m-%d").date(), ticker, t.action, t.quantity)
          for ticker, holding in portfolio.holdings.items()
@@ -67,7 +66,6 @@ def build_portfolio_value_series(portfolio: Portfolio,
 
     for dt in close.index:
         dt_date = dt.date()
-        # Apply all transactions up to this date
         while txn_idx < n_txns and txns[txn_idx][0] <= dt_date:
             _, ticker, action, qty = txns[txn_idx]
             key = ticker.upper()
@@ -82,36 +80,34 @@ def build_portfolio_value_series(portfolio: Portfolio,
         values.append(total)
 
     series = pd.Series(values, index=close.index, name="Portfolio")
-    # Trim leading zeros (before first transaction)
     nonzero = series[series > 0].index
     return series[nonzero[0]:] if len(nonzero) else None
 
-# ── Index data ────────────────────────────────────────────────────────────────
-def fetch_index_series(ticker: str, start_date: date) -> Optional[pd.Series]:
-    try:
-        raw = yf.download(ticker, start=start_date.strftime("%Y-%m-%d"),
-                          progress=False, auto_adjust=True)
-        if raw.empty: return None
-        s = raw["Close"].squeeze()
-        s.index = pd.to_datetime(s.index).tz_localize(None)
-        s.name  = ticker
-        return s
-    except Exception:
-        return None
 
-# ── Analytics ─────────────────────────────────────────────────────────────────
+def fetch_index_series(ticker: str, start_date: date) -> Optional[pd.Series]:
+    close = _download_close([ticker], start_date.strftime("%Y-%m-%d"))
+    if close is None:
+        return None
+    col = ticker.upper()
+    if col not in close.columns:
+        # Try first column if ticker naming is off
+        col = close.columns[0]
+    s = close[col].dropna()
+    s.name = ticker
+    return s if not s.empty else None
+
+
 def normalise(series: pd.Series) -> pd.Series:
-    """Rebase series to start at 100 (growth of €100)."""
     first = series.dropna().iloc[0]
     return series if first == 0 else (series / first) * 100
 
+
 def compute_drawdown(series: pd.Series) -> pd.Series:
-    """Percentage decline from rolling peak at each point."""
     peak = series.cummax()
     return (series - peak) / peak * 100
 
+
 def compute_stats(series: pd.Series, label: str) -> dict:
-    """Return a dict of display-ready performance statistics."""
     series = series.dropna()
     if len(series) < 2:
         return {"Label": label}
@@ -132,8 +128,8 @@ def compute_stats(series: pd.Series, label: str) -> dict:
         "Days":            str(len(series)),
     }
 
+
 def get_portfolio_start_date(portfolio: Portfolio) -> Optional[date]:
-    """Earliest transaction date across all holdings."""
     dates = [datetime.strptime(t.date, "%Y-%m-%d").date()
              for h in portfolio.holdings.values() for t in h.transactions]
     return min(dates) if dates else None

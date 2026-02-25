@@ -142,11 +142,13 @@ def fetch_return_matrix(tickers: List[str], period: str = "1y") -> Optional[pd.D
         raw = yf.download(tickers, period=period, progress=False, auto_adjust=True)
         if raw.empty:
             return None
-        close = raw["Close"]
-        if isinstance(close, pd.Series):
-            close = close.to_frame(name=tickers[0].upper())
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw.xs("Close", axis=1, level=0)
         else:
-            close.columns = [c.upper() for c in close.columns]
+            close = raw["Close"]
+            if isinstance(close, pd.Series):
+                close = close.to_frame(name=tickers[0].upper())
+        close.columns = [str(c).upper() for c in close.columns]
         return close.pct_change().dropna()
     except Exception:
         return None

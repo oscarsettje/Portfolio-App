@@ -1,10 +1,7 @@
 """
 tracker/prices.py  —  Live price fetching via Yahoo Finance
 
-Key concepts:
-  - Caching    : avoid redundant API calls within a session
-  - Batch fetch: yf.download() retrieves multiple tickers in one request
-  - Fallback   : if batch fails, retry each ticker individually
+Handles yfinance >= 0.2.40 which returns MultiIndex DataFrames from yf.download().
 """
 
 from typing import Dict, Optional
@@ -12,12 +9,42 @@ import pandas as pd
 import yfinance as yf
 
 
+def _extract_close(raw: pd.DataFrame, tickers: list) -> Dict[str, float]:
+    """
+    Extract the latest close price for each ticker from a yf.download() result.
+
+    yfinance >= 0.2.40 returns a MultiIndex DataFrame where columns are
+    (field, ticker) tuples. We use .xs() to slice the 'Close' level safely.
+    Older versions return a flat DataFrame — we handle both.
+    """
+    result = {}
+    try:
+        if isinstance(raw.columns, pd.MultiIndex):
+            # New yfinance: columns are ("Close","AAPL"), ("Volume","AAPL") etc.
+            close = raw.xs("Close", axis=1, level=0)
+        else:
+            close = raw["Close"]
+            if isinstance(close, pd.Series):
+                close = close.to_frame(name=tickers[0].upper())
+
+        close.columns = [str(c).upper() for c in close.columns]
+
+        for ticker in tickers:
+            col = ticker.upper()
+            if col in close.columns:
+                series = close[col].dropna()
+                if not series.empty:
+                    result[col] = float(series.iloc[-1])
+    except Exception as e:
+        print(f"[Warning] _extract_close failed: {e}")
+    return result
+
+
 class PriceFetcher:
     def __init__(self):
         self._cache: Dict[str, float] = {}
 
     def get_price(self, ticker: str) -> Optional[float]:
-        """Fetch a single price, using cache if available."""
         ticker = ticker.upper()
         if ticker in self._cache:
             return self._cache[ticker]
@@ -36,7 +63,6 @@ class PriceFetcher:
         return None
 
     def get_prices(self, tickers: list) -> Dict[str, Optional[float]]:
-        """Fetch prices for multiple tickers, batch where possible."""
         tickers  = [t.upper() for t in tickers]
         to_fetch = [t for t in tickers if t not in self._cache]
 
@@ -44,21 +70,10 @@ class PriceFetcher:
             try:
                 raw = yf.download(to_fetch, period="2d", progress=False, auto_adjust=True)
                 if not raw.empty:
-                    close = raw["Close"]
-                    # yfinance returns a Series for single ticker, DataFrame for multiple
-                    if isinstance(close, pd.Series):
-                        price = float(close.dropna().iloc[-1])
-                        self._cache[to_fetch[0]] = price
-                    else:
-                        for ticker in to_fetch:
-                            try:
-                                self._cache[ticker] = float(close[ticker].dropna().iloc[-1])
-                            except Exception:
-                                pass
+                    self._cache.update(_extract_close(raw, to_fetch))
             except Exception as e:
                 print(f"[Warning] Batch fetch failed: {e}")
 
-        # Individual fallback for anything still missing
         for ticker in to_fetch:
             if ticker not in self._cache:
                 self.get_price(ticker)
