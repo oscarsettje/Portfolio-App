@@ -157,7 +157,7 @@ def render_sidebar():
         st.markdown("## 📈 Portfolio Tracker")
         st.divider()
         page = st.radio("Nav", ["Dashboard","Holdings","Add Transaction",
-                                "Benchmark","Covariance Matrix","Snapshot History"],
+                                "Benchmark","Covariance Matrix","Snapshot History","Portfolio Analysis"],
                         label_visibility="collapsed")
         st.divider()
         holdings = portfolio().all_holdings()
@@ -744,7 +744,284 @@ def main():
      "Add Transaction":  render_add_transaction,
      "Benchmark":        render_benchmark,
      "Covariance Matrix":render_covariance,
-     "Snapshot History": render_snapshot_history}.get(page, render_dashboard)()
+     "Snapshot History": render_snapshot_history,
+     "Portfolio Analysis": render_analysis}.get(page, render_dashboard)()
 
 if __name__ == "__main__":
     main()
+
+# ── Portfolio Analysis ────────────────────────────────────────────────────────
+def render_analysis():
+    from tracker.analysis import (
+        portfolio_weights, concentration_hhi, by_asset_type, by_geography,
+        by_sector, fetch_sectors, fetch_return_matrix, correlation_matrix,
+        avg_pairwise_correlation, portfolio_volatility,
+        apply_stress, PRESET_SCENARIOS,
+    )
+
+    st.markdown("## Portfolio Analysis")
+    holdings = portfolio().all_holdings()
+    prices   = get_prices()
+
+    if len(holdings) < 2:
+        st.info("Add at least 2 holdings to run portfolio analysis.")
+        return
+
+    weights = portfolio_weights(holdings, prices)
+    tickers = list(weights.keys())
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 1 — DIVERSIFICATION
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🗂  Diversification")
+
+    hhi = concentration_hhi(weights)
+    hhi_label = ("🟢 Well diversified" if hhi < 1_500
+                 else "🟡 Moderately concentrated" if hhi < 2_500
+                 else "🔴 Highly concentrated")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("HHI Concentration Score", f"{hhi:,.0f} / 10,000",
+              help="Herfindahl–Hirschman Index. Below 1,500 = diversified, above 2,500 = concentrated.")
+    c2.metric("Diversification Rating", hhi_label)
+    c3.metric("Number of Holdings", str(len(holdings)))
+
+    st.divider()
+
+    # By asset type + geography side by side
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown('<p class="section-title">By Asset Type</p>', unsafe_allow_html=True)
+        df_type = by_asset_type(holdings, prices)
+        if not df_type.empty:
+            fig = go.Figure(go.Pie(
+                labels=df_type["Asset Type"], values=df_type["Value (€)"],
+                hole=0.5, marker=dict(colors=PALETTE, line=dict(color=BG, width=2)),
+                textinfo="label+percent",
+                hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<br>%{percent}<extra></extra>"))
+            fig.update_layout(**_chart_layout(height=280))
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(df_type.style.format({"Value (€)": "€{:,.2f}", "Weight (%)": "{:.2f}%"}),
+                         use_container_width=True, hide_index=True)
+
+    with col_r:
+        st.markdown('<p class="section-title">By Geography</p>', unsafe_allow_html=True)
+        df_geo = by_geography(holdings, prices)
+        if not df_geo.empty:
+            fig2 = go.Figure(go.Pie(
+                labels=df_geo["Region"], values=df_geo["Value (€)"],
+                hole=0.5,
+                marker=dict(colors=PALETTE[2:] + PALETTE[:2], line=dict(color=BG, width=2)),
+                textinfo="label+percent",
+                hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<br>%{percent}<extra></extra>"))
+            fig2.update_layout(**_chart_layout(height=280))
+            fig2.update_layout(showlegend=False)
+            st.plotly_chart(fig2, use_container_width=True)
+            st.dataframe(df_geo.style.format({"Value (€)": "€{:,.2f}", "Weight (%)": "{:.2f}%"}),
+                         use_container_width=True, hide_index=True)
+
+    # Sector breakdown — requires yfinance calls so put behind a button
+    st.divider()
+    st.markdown('<p class="section-title">By Sector</p>', unsafe_allow_html=True)
+    st.caption("Sector data is fetched from Yahoo Finance — may not be available for all tickers.")
+
+    if "sector_cache" not in st.session_state:
+        st.session_state.sector_cache = {}
+
+    if st.button("Fetch Sector Data", key="fetch_sectors"):
+        with st.spinner("Fetching sector info…"):
+            st.session_state.sector_cache = fetch_sectors(tickers)
+
+    if st.session_state.sector_cache:
+        df_sec = by_sector(holdings, prices, st.session_state.sector_cache)
+        if not df_sec.empty:
+            fig3 = go.Figure(go.Bar(
+                x=df_sec["Sector"], y=df_sec["Weight (%)"],
+                marker_color=PALETTE * 3,
+                hovertemplate="<b>%{x}</b><br>%{y:.2f}%<extra></extra>"))
+            fig3.update_layout(**_chart_layout(height=280))
+            fig3.update_layout(yaxis=dict(gridcolor="#1e1e1e", ticksuffix="%"),
+                               xaxis=dict(gridcolor="#1e1e1e"))
+            st.plotly_chart(fig3, use_container_width=True)
+            st.dataframe(df_sec.style.format({"Value (€)": "€{:,.2f}", "Weight (%)": "{:.2f}%"}),
+                         use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 2 — CORRELATION
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 📊  Correlation & Volatility")
+
+    period_choice = st.radio("Data period", ["3M","6M","1Y","2Y","3Y"],
+                             index=2, horizontal=True, key="corr_period")
+    period_map    = {"3M":"3mo","6M":"6mo","1Y":"1y","2Y":"2y","3Y":"3y"}
+
+    if st.button("Run Correlation Analysis", type="primary", key="run_corr"):
+        with st.spinner("Downloading price data…"):
+            returns = fetch_return_matrix(tickers, period_map[period_choice])
+
+        if returns is None or returns.empty:
+            st.error("Could not fetch price data.")
+        else:
+            corr  = correlation_matrix(returns)
+            avg_r = avg_pairwise_correlation(corr)
+            vol   = portfolio_volatility(returns, weights)
+
+            # Metrics
+            r_label = ("🟢 Low" if avg_r < 0.3 else
+                       "🟡 Moderate" if avg_r < 0.6 else "🔴 High")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Avg Pairwise Correlation", f"{avg_r:.2f}",
+                      help="Average correlation between all pairs. Lower = more diversification benefit.")
+            m2.metric("Correlation Level", r_label)
+            m3.metric("Portfolio Ann. Volatility", f"{vol:.1%}",
+                      help="Annualised volatility using the full covariance matrix.")
+
+            st.divider()
+
+            # Correlation heatmap
+            st.markdown('<p class="section-title">Correlation Matrix</p>', unsafe_allow_html=True)
+            labels = list(corr.columns)
+            fig_c = go.Figure(go.Heatmap(
+                z=corr.values.tolist(), x=labels, y=labels,
+                text=[[f"{v:.2f}" for v in row] for row in corr.values],
+                texttemplate="%{text}", colorscale="RdYlGn",
+                zmin=-1, zmax=1, zmid=0, showscale=True,
+                hovertemplate="<b>%{y} × %{x}</b><br>Correlation: %{text}<extra></extra>"))
+            fig_c.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color="#cccccc",
+                                font_size=11, margin=dict(t=10,b=10,l=10,r=10), height=400)
+            st.plotly_chart(fig_c, use_container_width=True)
+
+            # Individual volatility bars
+            st.markdown('<p class="section-title">Individual Annualised Volatility</p>',
+                        unsafe_allow_html=True)
+            vols = {t: float(returns[t].std() * np.sqrt(252)) for t in returns.columns}
+            fig_v = go.Figure(go.Bar(
+                x=list(vols.keys()), y=[v * 100 for v in vols.values()],
+                marker_color=PALETTE * 5,
+                hovertemplate="<b>%{x}</b><br>Volatility: %{y:.1f}%<extra></extra>"))
+            fig_v.update_layout(**_chart_layout(height=280))
+            fig_v.update_layout(yaxis=dict(gridcolor="#1e1e1e", ticksuffix="%"))
+            st.plotly_chart(fig_v, use_container_width=True)
+
+            # Rolling correlation (first two tickers)
+            if len(tickers) >= 2:
+                st.markdown('<p class="section-title">Rolling 30-Day Correlation '
+                            f'({tickers[0]} vs {tickers[1]})</p>', unsafe_allow_html=True)
+                rolling = (returns[tickers[0].upper()]
+                           .rolling(30)
+                           .corr(returns[tickers[1].upper()])
+                           .dropna())
+                fig_r = go.Figure(go.Scatter(
+                    x=rolling.index, y=rolling.values,
+                    line=dict(color=BLUE, width=1.5),
+                    hovertemplate="%{x|%d %b %Y}<br>Corr: %{y:.2f}<extra></extra>"))
+                fig_r.add_hline(y=0,   line_color="#333", line_dash="dash", line_width=1)
+                fig_r.add_hline(y=0.7, line_color=LOSS,  line_dash="dot",  line_width=1,
+                                annotation_text="High correlation (0.7)")
+                fig_r.update_layout(**_chart_layout(height=260))
+                fig_r.update_layout(yaxis=dict(gridcolor="#1e1e1e", range=[-1.1, 1.1]))
+                st.plotly_chart(fig_r, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — STRESS TESTING
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### ⚡  Stress Testing")
+
+    tv = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
+    ti = sum(h.total_invested for h in holdings)
+
+    tab_preset, tab_custom = st.tabs(["Preset Scenarios", "Custom Scenario"])
+
+    # ── Preset tab ──
+    with tab_preset:
+        scenario_name = st.selectbox("Choose scenario", list(PRESET_SCENARIOS.keys()))
+        scenario      = PRESET_SCENARIOS[scenario_name]
+        st.caption(scenario["description"])
+
+        rows = apply_stress(holdings, prices, scenario["shocks"])
+        if not rows:
+            st.warning("No priced holdings to stress test.")
+        else:
+            df_stress = pd.DataFrame(rows)
+            total_after  = df_stress["Value After"].sum()
+            total_impact = total_after - tv
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Current Value",  fmt_cur(tv))
+            m2.metric("Value After",    fmt_cur(total_after))
+            m3.metric("Total Impact",   fmt_cur(total_impact),
+                      delta=fmt_pct(total_impact / tv * 100 if tv else 0))
+            m4.metric("Scenario",       scenario_name)
+
+            # Impact bar chart
+            fig_s = go.Figure(go.Bar(
+                x=df_stress["Ticker"], y=df_stress["Impact (€)"],
+                marker_color=[GAIN if v >= 0 else LOSS for v in df_stress["Impact (€)"]],
+                hovertemplate="<b>%{x}</b><br>Impact: €%{y:+,.2f}<extra></extra>"))
+            fig_s.add_hline(y=0, line_color="#333", line_dash="dash", line_width=1)
+            fig_s.update_layout(**_chart_layout(height=300))
+            fig_s.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+            st.plotly_chart(fig_s, use_container_width=True)
+
+            # Table
+            st.dataframe(
+                df_stress[["Ticker","Asset Type","Value Now","Value After","Impact (€)","Impact (%)"]].style
+                  .applymap(lambda v: f"color:{GAIN}" if v > 0 else (f"color:{LOSS}" if v < 0 else ""),
+                            subset=["Impact (€)", "Impact (%)"])
+                  .format({"Value Now": "€{:,.2f}", "Value After": "€{:,.2f}",
+                           "Impact (€)": "€{:+,.2f}", "Impact (%)": "{:+.1f}%"}),
+                use_container_width=True, hide_index=True)
+
+    # ── Custom tab ──
+    with tab_custom:
+        st.markdown('<p class="section-title">Set shock per asset type</p>',
+                    unsafe_allow_html=True)
+        st.caption("Enter the expected % change for each asset type in your scenario.")
+
+        asset_types = list({h.asset_type.lower() for h in holdings})
+        custom_shocks = {}
+        cols = st.columns(len(asset_types))
+        for i, at in enumerate(asset_types):
+            with cols[i]:
+                val = st.number_input(f"{at.upper()} (%)", min_value=-100.0,
+                                      max_value=500.0, value=0.0, step=1.0,
+                                      key=f"shock_{at}")
+                custom_shocks[at] = val / 100
+
+        custom_name = st.text_input("Scenario name", placeholder="e.g. My bear case")
+
+        if st.button("Run Custom Scenario", type="primary", key="run_custom"):
+            rows_c = apply_stress(holdings, prices, custom_shocks)
+            if not rows_c:
+                st.warning("No priced holdings to stress test.")
+            else:
+                df_c        = pd.DataFrame(rows_c)
+                total_c     = df_c["Value After"].sum()
+                impact_c    = total_c - tv
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Current Value", fmt_cur(tv))
+                m2.metric("Value After",   fmt_cur(total_c))
+                m3.metric("Total Impact",  fmt_cur(impact_c),
+                          delta=fmt_pct(impact_c / tv * 100 if tv else 0))
+
+                fig_cs = go.Figure(go.Bar(
+                    x=df_c["Ticker"], y=df_c["Impact (€)"],
+                    marker_color=[GAIN if v >= 0 else LOSS for v in df_c["Impact (€)"]],
+                    hovertemplate="<b>%{x}</b><br>Impact: €%{y:+,.2f}<extra></extra>"))
+                fig_cs.add_hline(y=0, line_color="#333", line_dash="dash", line_width=1)
+                fig_cs.update_layout(**_chart_layout(
+                    title=custom_name or "Custom Scenario", height=300))
+                fig_cs.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+                st.plotly_chart(fig_cs, use_container_width=True)
+
+                st.dataframe(
+                    df_c[["Ticker","Asset Type","Value Now","Value After","Impact (€)","Impact (%)"]].style
+                      .applymap(lambda v: f"color:{GAIN}" if v > 0 else (f"color:{LOSS}" if v < 0 else ""),
+                                subset=["Impact (€)", "Impact (%)"])
+                      .format({"Value Now": "€{:,.2f}", "Value After": "€{:,.2f}",
+                               "Impact (€)": "€{:+,.2f}", "Impact (%)": "{:+.1f}%"}),
+                    use_container_width=True, hide_index=True)
