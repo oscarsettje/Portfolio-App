@@ -78,13 +78,9 @@ def get_prices() -> Dict[str, Optional[float]]:
         if tickers:
             with st.spinner("Fetching live prices…"):
                 st.session_state.prices = fetcher().get_prices(tickers)
-            # Track which tickers are using cached (stale) prices
-            fresh = fetcher()._cache
-            st.session_state.stale_prices = {
-                t for t in tickers
-                if t not in fresh or fresh.get(t) == fetcher()._disk.get(t)
-                   and t in fetcher()._disk
-            }
+                st.session_state.stale_prices = {
+                    t for t in tickers if fetcher().is_stale(t)
+                }
         for h in holdings:
             if h.manual_price is not None:
                 st.session_state.prices[h.ticker] = h.manual_price

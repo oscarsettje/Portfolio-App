@@ -28,23 +28,22 @@ def _close_from_download(raw: pd.DataFrame, tickers: list) -> pd.DataFrame:
 
 class PriceFetcher:
     def __init__(self, db=None):
-        """
-        db : tracker.db.Database instance (optional).
-             When provided, prices are persisted to the price_cache table
-             and loaded from there as fallback. When None, falls back to a
-             plain dict (useful for tests / standalone use).
-        """
         self._db    = db
         self._cache: Dict[str, float] = {}
-        # Pre-load last known prices from DB into memory
+        self._fresh: set = set()   # tickers with a live price this session
         if self._db is not None:
             self._cache.update(self._db.get_price_cache())
 
     def _store(self, ticker: str, price: float) -> None:
-        """Save a fresh price to memory and DB."""
+        """Save a fresh price to memory, DB, and mark as live."""
         self._cache[ticker] = price
+        self._fresh.add(ticker)
         if self._db is not None:
             self._db.set_price(ticker, price)
+
+    def is_stale(self, ticker: str) -> bool:
+        """True if price comes from DB cache, not a live fetch this session."""
+        return ticker.upper() not in self._fresh
 
     def get_price(self, ticker: str) -> Optional[float]:
         ticker = ticker.upper()
