@@ -1,24 +1,29 @@
 """
 tracker/portfolio.py  —  Core data model
 
-Key concepts:
-  - dataclasses   : clean data-holding objects with auto-generated __init__
-  - JSON          : simple text format for saving/loading data
-  - @property     : computed attributes that look like regular fields
+The Holding / Transaction / Snapshot dataclasses are unchanged so every
+other module (app.py, benchmark.py, quant.py, analysis.py) keeps working.
+
+Portfolio now delegates all persistence to tracker.db.Database instead of
+reading/writing JSON directly. JSON files are still written as backups after
+every change.
 """
 
-import json, os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Dict, List, Optional
 
+from tracker.db import Database
+
+
+# ── Dataclasses (unchanged — rest of app depends on these) ────────────────────
 
 @dataclass
 class Transaction:
-    date: str       # ISO format: "2024-01-15"
-    action: str     # "buy" or "sell"
+    date:     str    # "YYYY-MM-DD"
+    action:   str    # "buy" or "sell"
     quantity: float
-    price: float
+    price:    float
 
     @property
     def total_cost(self) -> float:
@@ -27,11 +32,11 @@ class Transaction:
 
 @dataclass
 class Holding:
-    ticker: str
-    name: str
-    asset_type: str         # "stock", "crypto", or "etf"
+    ticker:       str
+    name:         str
+    asset_type:   str
     transactions: List[Transaction] = field(default_factory=list)
-    manual_price: Optional[float] = None   # ← NEW: user-set price override
+    manual_price: Optional[float]   = None
 
     @property
     def quantity(self) -> float:
@@ -69,17 +74,10 @@ class Holding:
 
 @dataclass
 class Snapshot:
-    """
-    A point-in-time record of total portfolio value.
-    Saved manually by the user to track value over time.
-
-    Key concept: @dataclass gives us __init__, __repr__ etc. for free,
-    and asdict() lets us serialise it to JSON with one call.
-    """
-    date:            str    # "2024-01-15"
-    total_value:     float
-    total_invested:  float
-    note:            str = ""
+    date:           str
+    total_value:    float
+    total_invested: float
+    note:           str = ""
 
     @property
     def pnl(self) -> float:
@@ -90,44 +88,62 @@ class Snapshot:
         return (self.pnl / self.total_invested * 100) if self.total_invested else 0.0
 
 
-class Portfolio:
-    DATA_FILE      = "portfolio_data.json"
-    SNAPSHOT_FILE  = "portfolio_snapshots.json"
+# ── Portfolio (now backed by SQLite) ─────────────────────────────────────────
 
-    def __init__(self):
-        self.holdings:  Dict[str, Holding]  = {}
-        self.snapshots: List[Snapshot]      = []
-        self.load()
+class Portfolio:
+    def __init__(self, db: Database):
+        self._db       = db
+        self.holdings:  Dict[str, Holding] = {}
+        self.snapshots: List[Snapshot]     = []
+        self._load()
+
+    def _load(self) -> None:
+        self.holdings  = self._db.get_all_holdings()
+        self.snapshots = self._db.get_snapshots()
+
+    def _reload(self) -> None:
+        """Re-read from DB after any write — keeps in-memory state in sync."""
+        self._load()
 
     # ── Holdings CRUD ─────────────────────────────────────────────────────────
 
     def add_transaction(self, ticker: str, name: str, asset_type: str,
                         action: str, quantity: float, price: float,
                         date: Optional[str] = None) -> None:
+        ticker = ticker.upper()
         if date is None:
             date = datetime.today().strftime("%Y-%m-%d")
-        ticker = ticker.upper()
-        if ticker not in self.holdings:
-            self.holdings[ticker] = Holding(ticker=ticker, name=name,
-                                            asset_type=asset_type.lower())
-        self.holdings[ticker].transactions.append(
-            Transaction(date=date, action=action, quantity=quantity, price=price))
-        self.save()
+        # Ensure holding row exists first
+        self._db.upsert_holding(ticker, name, asset_type.lower(),
+                                self.holdings[ticker].manual_price
+                                if ticker in self.holdings else None)
+        self._db.add_transaction(ticker, date, action, quantity, price)
+        self._db.export_json_backup()
+        self._reload()
 
     def remove_holding(self, ticker: str) -> bool:
         ticker = ticker.upper()
         if ticker in self.holdings:
-            del self.holdings[ticker]
-            self.save()
+            self._db.delete_holding(ticker)
+            self._db.export_json_backup()
+            self._reload()
             return True
         return False
 
     def set_manual_price(self, ticker: str, price: Optional[float]) -> None:
-        """Set or clear a manual price override for a ticker."""
         ticker = ticker.upper()
         if ticker in self.holdings:
-            self.holdings[ticker].manual_price = price
-            self.save()
+            self._db.set_manual_price(ticker, price)
+            self._db.export_json_backup()
+            self._reload()
+
+    def replace_transactions(self, ticker: str,
+                              transactions: List[Transaction]) -> None:
+        """Replace all transactions for a ticker atomically (used by editor)."""
+        ticker = ticker.upper()
+        self._db.replace_transactions(ticker, transactions)
+        self._db.export_json_backup()
+        self._reload()
 
     def get_holding(self, ticker: str) -> Optional[Holding]:
         return self.holdings.get(ticker.upper())
@@ -139,47 +155,17 @@ class Portfolio:
 
     def add_snapshot(self, total_value: float, total_invested: float,
                      note: str = "") -> Snapshot:
-        """Record current portfolio value as a snapshot."""
-        snap = Snapshot(
+        snap = self._db.add_snapshot(
             date=datetime.today().strftime("%Y-%m-%d"),
             total_value=round(total_value, 2),
             total_invested=round(total_invested, 2),
             note=note,
         )
-        self.snapshots.append(snap)
-        self.save_snapshots()
+        self._db.export_json_backup()
+        self._reload()
         return snap
 
     def delete_snapshot(self, index: int) -> None:
-        if 0 <= index < len(self.snapshots):
-            self.snapshots.pop(index)
-            self.save_snapshots()
-
-    # ── Persistence ───────────────────────────────────────────────────────────
-
-    def save(self) -> None:
-        data = {ticker: asdict(h) for ticker, h in self.holdings.items()}
-        with open(self.DATA_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-
-    def load(self) -> None:
-        if os.path.exists(self.DATA_FILE):
-            with open(self.DATA_FILE) as f:
-                data = json.load(f)
-            for ticker, d in data.items():
-                transactions = [Transaction(**t) for t in d.get("transactions", [])]
-                self.holdings[ticker] = Holding(
-                    ticker=d["ticker"], name=d["name"], asset_type=d["asset_type"],
-                    transactions=transactions,
-                    manual_price=d.get("manual_price"),   # backward-compatible
-                )
-        self.load_snapshots()
-
-    def save_snapshots(self) -> None:
-        with open(self.SNAPSHOT_FILE, "w") as f:
-            json.dump([asdict(s) for s in self.snapshots], f, indent=2)
-
-    def load_snapshots(self) -> None:
-        if os.path.exists(self.SNAPSHOT_FILE):
-            with open(self.SNAPSHOT_FILE) as f:
-                self.snapshots = [Snapshot(**s) for s in json.load(f)]
+        self._db.delete_snapshot(index)
+        self._db.export_json_backup()
+        self._reload()

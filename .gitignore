@@ -1,6 +1,8 @@
-# Portfolio data — keep off GitHub
+# Database and data files — keep off GitHub
+portfolio.db
 portfolio_data.json
 portfolio_snapshots.json
+price_cache.json
 
 # Python
 __pycache__/

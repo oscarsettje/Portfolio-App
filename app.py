@@ -17,6 +17,7 @@ from tracker.benchmark import (
     compute_stats, fetch_index_series, get_portfolio_start_date, normalise,
 )
 from tracker.portfolio import Holding, Portfolio, Transaction
+from tracker.db import Database
 from tracker.prices import PriceFetcher, _close_from_download
 import tracker.exporter as exporter
 
@@ -56,15 +57,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "portfolio"    not in st.session_state: st.session_state.portfolio    = Portfolio()
-if "fetcher"      not in st.session_state: st.session_state.fetcher      = PriceFetcher()
+if "db"           not in st.session_state: st.session_state.db           = Database()
+if "fetcher"      not in st.session_state: st.session_state.fetcher      = PriceFetcher(db=st.session_state.db)
+if "portfolio"    not in st.session_state: st.session_state.portfolio    = Portfolio(db=st.session_state.db)
 if "prices"       not in st.session_state: st.session_state.prices       = {}
 if "news_cache"   not in st.session_state: st.session_state.news_cache   = {}
-if "sector_cache"   not in st.session_state: st.session_state.sector_cache   = {}
-if "stale_prices"   not in st.session_state: st.session_state.stale_prices   = set()
+if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
+if "stale_prices" not in st.session_state: st.session_state.stale_prices = set()
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
 def fetcher()   -> PriceFetcher: return st.session_state.fetcher
+def db()        -> Database:     return st.session_state.db
 
 # ── Prices ────────────────────────────────────────────────────────────────────
 def get_prices() -> Dict[str, Optional[float]]:
@@ -380,14 +383,14 @@ def render_holdings():
                 })
             if not edited_df.equals(original_df):
                 if st.button("💾  Save changes", key=f"save_{h.ticker}", type="primary"):
-                    portfolio().holdings[h.ticker].transactions = [
+                    new_txns = [
                         Transaction(date=str(r["Date"]).strip(),
                                     action=str(r["Action"]).lower().strip(),
                                     quantity=float(r["Quantity"]),
                                     price=float(r["Price"]))
                         for _, r in edited_df.dropna(subset=["Date","Action","Quantity","Price"]).iterrows()
                     ]
-                    portfolio().save()
+                    portfolio().replace_transactions(h.ticker, new_txns)
                     invalidate_prices()
                     st.success("✓ Saved"); st.rerun()
 
