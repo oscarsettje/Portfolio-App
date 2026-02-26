@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from tracker.portfolio import Holding
+from tracker.models import Holding
 from tracker.prices import _close_from_download
 
 

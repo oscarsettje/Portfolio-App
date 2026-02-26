@@ -10,7 +10,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-from tracker.portfolio import Holding
+from tracker.models import Holding
 
 # ── Colour constants ──────────────────────────────────────────────────────────
 HEADER_BG  = "1A237E"

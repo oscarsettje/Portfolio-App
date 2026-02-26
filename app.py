@@ -16,7 +16,8 @@ from tracker.benchmark import (
     INDICES, build_portfolio_value_series, compute_drawdown,
     compute_stats, fetch_index_series, get_portfolio_start_date, normalise,
 )
-from tracker.portfolio import Holding, Portfolio, Transaction
+from tracker.models import Holding, Snapshot, Transaction
+from tracker.portfolio import Portfolio
 from tracker.db import Database
 from tracker.prices import PriceFetcher, _close_from_download
 import tracker.exporter as exporter

@@ -33,7 +33,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from tracker.portfolio import Holding, Snapshot, Transaction
+from tracker.models import Holding, Snapshot, Transaction
 
 DB_FILE            = "portfolio.db"
 JSON_DATA_FILE     = "portfolio_data.json"
