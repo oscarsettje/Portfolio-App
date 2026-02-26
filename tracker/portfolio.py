@@ -1,21 +1,12 @@
 """
-tracker/portfolio.py  —  Portfolio class (persistence layer)
-
-Dataclasses (Holding, Transaction, Snapshot) have moved to tracker.models
-to avoid a circular import with tracker.db.
-
-Import map (no cycles):
-  models.py   ← no tracker imports
-  db.py       ← models.py
-  portfolio.py← db.py, models.py
-  app.py      ← portfolio.py, models.py, db.py
+tracker/portfolio.py  —  Portfolio class (SQLite-backed)
 """
 
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from tracker.db import Database
-from tracker.models import Holding, Snapshot, Transaction
+from tracker.models import Dividend, Holding, Snapshot, Transaction
 
 
 class Portfolio:
@@ -32,18 +23,19 @@ class Portfolio:
     def _reload(self) -> None:
         self._load()
 
-    # ── Holdings CRUD ─────────────────────────────────────────────────────────
+    # ── Transactions ──────────────────────────────────────────────────────────
 
     def add_transaction(self, ticker: str, name: str, asset_type: str,
                         action: str, quantity: float, price: float,
-                        date: Optional[str] = None) -> None:
+                        date: Optional[str] = None,
+                        commission: float = 0.0) -> None:
         ticker = ticker.upper()
         if date is None:
             date = datetime.today().strftime("%Y-%m-%d")
         self._db.upsert_holding(ticker, name, asset_type.lower(),
                                 self.holdings[ticker].manual_price
                                 if ticker in self.holdings else None)
-        self._db.add_transaction(ticker, date, action, quantity, price)
+        self._db.add_transaction(ticker, date, action, quantity, price, commission)
         self._db.export_json_backup()
         self._reload()
 
@@ -75,6 +67,25 @@ class Portfolio:
 
     def all_holdings(self) -> List[Holding]:
         return [h for h in self.holdings.values() if h.quantity > 0]
+
+    # ── Dividends ─────────────────────────────────────────────────────────────
+
+    def add_dividend(self, ticker: str, date: str, amount: float,
+                     withholding_tax: float = 0.0) -> Dividend:
+        ticker = ticker.upper()
+        div = Dividend(ticker=ticker, date=date,
+                       amount=round(amount, 2),
+                       withholding_tax=round(withholding_tax, 2))
+        self._db.add_dividend(ticker, date, div.amount, div.withholding_tax)
+        self._db.export_json_backup()
+        return div
+
+    def delete_dividend(self, div_id: int) -> None:
+        self._db.delete_dividend(div_id)
+        self._db.export_json_backup()
+
+    def all_dividends(self) -> List[Dividend]:
+        return self._db.get_dividends()
 
     # ── Snapshots ─────────────────────────────────────────────────────────────
 

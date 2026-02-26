@@ -183,7 +183,7 @@ def _render_news(tickers: List[str]):
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 PAGES = ["Dashboard","Holdings","Add Transaction",
-         "Benchmark","Portfolio Analysis","Quant Metrics","Snapshot History"]
+         "Benchmark","Portfolio Analysis","Quant Metrics","Tax & Income","Snapshot History"]
 
 def render_sidebar():
     with st.sidebar:
@@ -371,16 +371,18 @@ def render_holdings():
             # Editable transactions
             _section("Transactions  (click a cell to edit, ✕ to delete a row)")
             original_df = pd.DataFrame([{"Date":t.date,"Action":t.action.lower(),
-                                          "Quantity":t.quantity,"Price":t.price}
+                                          "Quantity":t.quantity,"Price":t.price,
+                                          "Commission":t.commission}
                                          for t in h.transactions])
             edited_df = st.data_editor(
                 original_df, key=f"editor_{h.ticker}",
                 use_container_width=True, hide_index=True, num_rows="dynamic",
                 column_config={
-                    "Date":     st.column_config.TextColumn("Date", help="YYYY-MM-DD", width="small"),
-                    "Action":   st.column_config.SelectboxColumn("Action", options=["buy","sell"], width="small"),
-                    "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0001, format="%.4f", width="small"),
-                    "Price":    st.column_config.NumberColumn("Price (€)", min_value=0.0001, format="€%.4f", width="small"),
+                    "Date":       st.column_config.TextColumn("Date", help="YYYY-MM-DD", width="small"),
+                    "Action":     st.column_config.SelectboxColumn("Action", options=["buy","sell"], width="small"),
+                    "Quantity":   st.column_config.NumberColumn("Quantity", min_value=0.0001, format="%.4f", width="small"),
+                    "Price":      st.column_config.NumberColumn("Price (€)", min_value=0.0001, format="€%.4f", width="small"),
+                    "Commission": st.column_config.NumberColumn("Commission (€)", min_value=0.0, format="€%.2f", width="small"),
                 })
             if not edited_df.equals(original_df):
                 if st.button("💾  Save changes", key=f"save_{h.ticker}", type="primary"):
@@ -388,7 +390,8 @@ def render_holdings():
                         Transaction(date=str(r["Date"]).strip(),
                                     action=str(r["Action"]).lower().strip(),
                                     quantity=float(r["Quantity"]),
-                                    price=float(r["Price"]))
+                                    price=float(r["Price"]),
+                                    commission=float(r.get("Commission", 0) or 0))
                         for _, r in edited_df.dropna(subset=["Date","Action","Quantity","Price"]).iterrows()
                     ]
                     portfolio().replace_transactions(h.ticker, new_txns)
@@ -457,9 +460,11 @@ def render_add_transaction():
                 name       = st.text_input("Name", placeholder="e.g. Apple Inc.")
                 asset_type = st.selectbox("Asset Type", ["stock","crypto","etf"])
         with col2:
-            quantity = st.number_input("Quantity",           min_value=0.0001, step=0.0001, format="%.4f")
-            price    = st.number_input("Price per unit (€)", min_value=0.0001, step=0.01,   format="%.4f")
-            txn_date = st.date_input("Date", value=date.today())
+            quantity   = st.number_input("Quantity",           min_value=0.0001, step=0.0001, format="%.4f")
+            price      = st.number_input("Price per unit (€)", min_value=0.0001, step=0.01,   format="%.4f")
+            commission = st.number_input("Broker commission (€)", min_value=0.0, step=0.01, format="%.2f",
+                                         help="Fixed fee charged by your broker for this trade")
+            txn_date   = st.date_input("Date", value=date.today())
 
         if st.form_submit_button("Add Transaction", use_container_width=True, type="primary"):
             if not ticker:
@@ -473,7 +478,7 @@ def render_add_transaction():
                     name=h.name if h else name,
                     asset_type=h.asset_type if h else asset_type,
                     action=action.lower(), quantity=quantity,
-                    price=price, date=str(txn_date),
+                    price=price, date=str(txn_date), commission=commission,
                 )
                 invalidate_prices()
                 st.session_state.news_cache = {}
@@ -1122,6 +1127,194 @@ def _WEEKLY_SCALE(annual_rf: float) -> float:
     """Convert annual risk-free rate to weekly."""
     return (1 + annual_rf) ** (1 / 52) - 1
 
+
+# ── Tax & Income ─────────────────────────────────────────────────────────────
+def render_tax():
+    from tracker.tax import (
+        year_summary, compute_realised_gains, all_active_years,
+        EFFECTIVE_RATE, SPARERPAUSCHBETRAG,
+    )
+    from datetime import datetime as _dt
+
+    st.markdown("## Tax & Income")
+    st.caption("German Abgeltungsteuer (25% + 5.5% Soli = 26.375%) · Sparerpauschbetrag €1,000 · FIFO cost basis")
+
+    holdings  = portfolio().holdings
+    dividends = portfolio().all_dividends()
+
+    if not holdings:
+        st.info("Add some transactions first."); return
+
+    # ── Record a dividend ──
+    with st.expander("➕  Record Dividend Payment"):
+        tickers = [h.ticker for h in portfolio().all_holdings()]
+        if not tickers:
+            st.caption("No holdings yet.")
+        else:
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            div_ticker = dc1.selectbox("Ticker", tickers, key="div_ticker")
+            div_date   = dc2.date_input("Date", value=date.today(), key="div_date")
+            div_amount = dc3.number_input("Gross Amount (€)", min_value=0.01,
+                                          step=0.01, format="%.2f", key="div_amount")
+            div_wht    = dc4.number_input("Withholding Tax (€)", min_value=0.0,
+                                          step=0.01, format="%.2f", key="div_wht",
+                                          help="Tax already deducted at source by your broker")
+            if st.button("Save Dividend", type="primary", key="save_div"):
+                portfolio().add_dividend(div_ticker, str(div_date), div_amount, div_wht)
+                st.success(f"✓ Dividend of {fmt_cur(div_amount)} recorded for {div_ticker}")
+                st.rerun()
+
+    st.divider()
+
+    # ── Year selector ──
+    active_years = all_active_years(holdings, dividends)
+    if not active_years:
+        st.info("No transactions or dividends recorded yet."); return
+
+    current_year = _dt.today().year
+    if current_year not in active_years:
+        active_years.append(current_year)
+    active_years = sorted(set(active_years), reverse=True)
+    sel_year = st.selectbox("Tax Year", active_years, key="tax_year")
+    summary  = year_summary(sel_year, holdings, dividends)
+
+    # ── Headline cards ──
+    st.markdown(f"### {sel_year} Tax Summary")
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Realised Gains",    fmt_cur(summary.realised_gains),
+              help="Total gains from sell transactions (FIFO cost basis)")
+    c2.metric("Realised Losses",   f"-{fmt_cur(summary.realised_losses)}",
+              help="Total losses from sell transactions")
+    c3.metric("Dividend Income",   fmt_cur(summary.dividend_income),
+              help="Gross dividends received")
+    c4.metric("Total Commissions", fmt_cur(summary.total_commissions),
+              help="Broker fees paid — already included in cost basis")
+
+    c5,c6,c7,c8 = st.columns(4)
+    c5.metric("Net Taxable Base",  fmt_cur(summary.net_taxable),
+              help="Gains + dividends - losses (before Sparerpauschbetrag)")
+    c6.metric("After Allowance",   fmt_cur(summary.after_allowance),
+              help=f"After €{SPARERPAUSCHBETRAG:,.0f} Sparerpauschbetrag")
+    c7.metric("Estimated Tax",     fmt_cur(summary.tax_owed),
+              help="Abgeltungsteuer + Soli − withholding tax credit")
+    c8.metric("Withholding Credit",fmt_cur(summary.withholding_credit),
+              help="Tax already paid at source, credited against your bill")
+
+    # Sparerpauschbetrag bar
+    st.divider()
+    _section("Sparerpauschbetrag (Annual Allowance)")
+    pct_used = min(1.0, summary.allowance_used / SPARERPAUSCHBETRAG)
+    colour   = "#4caf7d" if pct_used < 0.8 else "#e8a838" if pct_used < 1.0 else "#e05c5c"
+    st.markdown(f"""
+    <div style="background:#1e1e1e;border-radius:8px;overflow:hidden;height:28px">
+      <div style="background:{colour};width:{pct_used*100:.1f}%;height:100%;
+           display:flex;align-items:center;padding-left:10px;
+           font-size:.85rem;font-weight:600;color:#fff">
+        {pct_used*100:.1f}% used
+      </div>
+    </div>""", unsafe_allow_html=True)
+    st.caption(f"Used: {fmt_cur(summary.allowance_used)}  ·  Remaining: {fmt_cur(summary.allowance_remaining)}")
+
+    # Tax breakdown
+    st.divider()
+    _section("Tax Calculation Breakdown")
+    breakdown = [
+        ("Realised gains (sells)",        fmt_cur(summary.realised_gains)),
+        ("Realised losses (sells)",       f"−{fmt_cur(summary.realised_losses)}"),
+        ("Dividend income",               fmt_cur(summary.dividend_income)),
+        ("Net taxable before allowance",  fmt_cur(summary.net_taxable)),
+        ("Sparerpauschbetrag deduction", f"−{fmt_cur(summary.allowance_used)}"),
+        ("Taxable base",                  fmt_cur(summary.after_allowance)),
+        ("Abgeltungsteuer (25%)",        fmt_cur(summary.abgeltungsteuer)),
+        ("Solidaritätszuschlag (5.5%)",  fmt_cur(summary.soli)),
+        ("Withholding tax credit",       f"−{fmt_cur(summary.withholding_credit)}"),
+        ("Estimated tax owed",            fmt_cur(summary.tax_owed)),
+    ]
+    st.dataframe(pd.DataFrame(breakdown, columns=["Item", "Amount"]),
+                 use_container_width=True, hide_index=True)
+    st.caption("⚠️  Estimate only. Kirchensteuer (8-9%) not included. Consult a Steuerberater for your official filing.")
+
+    # Realised gains detail
+    st.divider()
+    _section(f"Realised Gains / Losses — {sel_year}")
+    all_gains = [g for g in compute_realised_gains(holdings) if g.sell_date.startswith(str(sel_year))]
+    if not all_gains:
+        st.caption("No sell transactions in this year.")
+    else:
+        rows = [{"Ticker": g.ticker, "Sell Date": g.sell_date,
+                 "Qty": round(g.quantity,4), "Proceeds": round(g.proceeds,2),
+                 "Commission": round(g.commission,2),
+                 "Cost Basis": round(g.cost_basis,2),
+                 "Gain/Loss":  round(g.gain,2)} for g in all_gains]
+        st.dataframe(
+            pd.DataFrame(rows).style
+              .applymap(lambda v: f"color:{GAIN}" if v > 0 else (f"color:{LOSS}" if v < 0 else ""),
+                        subset=["Gain/Loss"])
+              .format({"Proceeds":"€{:,.2f}","Commission":"€{:,.2f}",
+                       "Cost Basis":"€{:,.2f}","Gain/Loss":"€{:+,.2f}"}),
+            use_container_width=True, hide_index=True)
+
+    # Dividend income
+    st.divider()
+    _section(f"Dividend Income — {sel_year}")
+    year_divs = [d for d in dividends if d.date.startswith(str(sel_year))]
+    if not year_divs:
+        st.caption("No dividends recorded for this year.")
+    else:
+        div_rows = [{"Ticker": d.ticker, "Date": d.date,
+                     "Gross (€)": round(d.amount,2),
+                     "Withholding (€)": round(d.withholding_tax,2),
+                     "Net (€)": round(d.net_amount,2)}
+                    for d in sorted(year_divs, key=lambda x: x.date)]
+        st.dataframe(pd.DataFrame(div_rows).style.format(
+            {"Gross (€)":"€{:,.2f}","Withholding (€)":"€{:,.2f}","Net (€)":"€{:,.2f}"}),
+            use_container_width=True, hide_index=True)
+
+        by_ticker = {}
+        for d in year_divs:
+            by_ticker[d.ticker] = by_ticker.get(d.ticker, 0) + d.amount
+        fig = go.Figure(go.Bar(x=list(by_ticker.keys()), y=list(by_ticker.values()),
+            marker_color=PALETTE * 3,
+            hovertemplate="<b>%{x}</b><br>€%{y:,.2f}<extra></extra>"))
+        fig.update_layout(**_chart_layout("Dividends by Holding", 260))
+        fig.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # All dividend records with delete
+    st.divider()
+    _section("All Dividend Records")
+    all_div_rows = db().get_dividends_with_ids()
+    if not all_div_rows:
+        st.caption("No dividends recorded yet.")
+    else:
+        for row in all_div_rows:
+            c1,c2,c3,c4,c5,c_del = st.columns([1,1,1,1,1,0.4])
+            c1.caption("Ticker");  c1.write(row["ticker"])
+            c2.caption("Date");    c2.write(row["date"])
+            c3.caption("Gross");   c3.write(fmt_cur(row["amount"]))
+            c4.caption("WHT");     c4.write(fmt_cur(row["withholding_tax"]))
+            c5.caption("Net");     c5.write(fmt_cur(row["amount"] - row["withholding_tax"]))
+            with c_del:
+                st.write("")
+                if st.button("✕", key=f"del_div_{row['id']}", help="Delete"):
+                    portfolio().delete_dividend(row["id"]); st.rerun()
+
+    # Multi-year overview
+    if len(active_years) > 1:
+        st.divider()
+        _section("Multi-Year Overview")
+        yearly = [year_summary(y, holdings, dividends) for y in sorted(active_years)]
+        st.dataframe(pd.DataFrame([{
+            "Year":           s.year,
+            "Gains":          fmt_cur(s.realised_gains),
+            "Losses":        f"-{fmt_cur(s.realised_losses)}",
+            "Dividends":      fmt_cur(s.dividend_income),
+            "Net Taxable":    fmt_cur(s.net_taxable),
+            "Allowance Used": fmt_cur(s.allowance_used),
+            "Est. Tax":       fmt_cur(s.tax_owed),
+        } for s in yearly]), use_container_width=True, hide_index=True)
+
+
 def main():
     page = render_sidebar()
     {
@@ -1132,6 +1325,7 @@ def main():
         "Portfolio Analysis": render_analysis,
         "Snapshot History":   render_snapshot_history,
         "Quant Metrics":      render_quant,
+        "Tax & Income":       render_tax,
     }.get(page, render_dashboard)()
 
 if __name__ == "__main__":

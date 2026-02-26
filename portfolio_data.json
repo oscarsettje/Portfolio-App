@@ -1,17 +1,4 @@
 {
-  "PPX.MU": {
-    "ticker": "PPX.MU",
-    "name": "Kering SA",
-    "asset_type": "stock",
-    "transactions": [
-      {
-        "date": "2024-10-15",
-        "action": "buy",
-        "quantity": 1.0,
-        "price": 226.89
-      }
-    ]
-  },
   "NLM.F": {
     "ticker": "NLM.F",
     "name": "Frosta AG",
@@ -23,6 +10,35 @@
         "quantity": 2.0,
         "price": 148.99
       }
-    ]
+    ],
+    "manual_price": null
+  },
+  "PPX.MU": {
+    "ticker": "PPX.MU",
+    "name": "Kering SA",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-10-15",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 226.89
+      }
+    ],
+    "manual_price": null
+  },
+  "BMT.MU": {
+    "ticker": "BMT.MU",
+    "name": "British American Tobacco ",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-08-05",
+        "action": "buy",
+        "quantity": 5.0,
+        "price": 32.0001
+      }
+    ],
+    "manual_price": null
   }
 }
