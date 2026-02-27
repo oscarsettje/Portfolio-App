@@ -19,28 +19,50 @@ INDICES = {
 }
 
 
-def _download_close(tickers: list, start: str) -> Optional[pd.DataFrame]:
-    """Download daily closes, return clean (date x ticker) DataFrame."""
+def _safe_tz(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Remove timezone info if present — yfinance is inconsistent about this."""
+    return index.tz_localize(None) if index.tz is not None else index
+
+
+def _download_close(tickers: list, start: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """
+    Download daily closes from start date.
+    Returns (DataFrame, None) on success or (None, error_message) on failure.
+    Silently drops tickers that returned no data rather than failing entirely.
+    """
     try:
-        raw = yf.download(tickers, start=start, progress=False, auto_adjust=True)
+        raw = yf.download(tickers, start=start, progress=False,
+                          auto_adjust=True, group_by="ticker")
         if raw.empty:
-            return None
+            return None, "Yahoo Finance returned no data. You may be rate-limited — try again later."
         close = _close_from_download(raw, tickers)
-        close.index = pd.to_datetime(close.index).tz_localize(None)
-        return close
-    except Exception:
-        return None
+        close.index = _safe_tz(pd.to_datetime(close.index))
+        # Drop columns that are all NaN (tickers with no data)
+        close = close.dropna(axis=1, how="all")
+        if close.empty:
+            return None, "All tickers returned empty data."
+        return close, None
+    except Exception as e:
+        return None, str(e)
 
 
-def build_portfolio_value_series(portfolio: Portfolio,
-                                  start_date: date) -> Optional[pd.Series]:
+def build_portfolio_value_series(
+        portfolio: Portfolio,
+        start_date: date) -> Tuple[Optional[pd.Series], Optional[str]]:
+    """
+    Returns (series, None) on success or (None, error_message) on failure.
+    Partial data is used — tickers with no price history are skipped with a warning.
+    """
     if not portfolio.all_holdings():
-        return None
+        return None, "No holdings in portfolio."
 
     all_tickers = list(portfolio.holdings.keys())
-    close = _download_close(all_tickers, start_date.strftime("%Y-%m-%d"))
+    close, err  = _download_close(all_tickers, start_date.strftime("%Y-%m-%d"))
     if close is None:
-        return None
+        return None, err
+
+    # Warn about tickers we couldn't get data for (but continue)
+    missing = [t for t in all_tickers if t.upper() not in close.columns]
 
     txns: List[Tuple[date, str, str, float]] = sorted(
         [(datetime.strptime(t.date, "%Y-%m-%d").date(), ticker, t.action, t.quantity)
@@ -68,21 +90,27 @@ def build_portfolio_value_series(portfolio: Portfolio,
         )
         values.append(total)
 
-    series = pd.Series(values, index=close.index, name="Portfolio")
+    series  = pd.Series(values, index=close.index, name="Portfolio")
     nonzero = series[series > 0].index
-    return series[nonzero[0]:] if len(nonzero) else None
+    if not len(nonzero):
+        return None, "Portfolio value series is all zeros — check your transaction prices."
+
+    warn = f"No historical data for: {', '.join(missing)}" if missing else None
+    return series[nonzero[0]:], warn
 
 
-def fetch_index_series(ticker: str, start_date: date) -> Optional[pd.Series]:
-    close = _download_close([ticker], start_date.strftime("%Y-%m-%d"))
+def fetch_index_series(ticker: str, start_date: date) -> Tuple[Optional[pd.Series], Optional[str]]:
+    close, err = _download_close([ticker], start_date.strftime("%Y-%m-%d"))
     if close is None:
-        return None
+        return None, err
     col = ticker.upper()
     if col not in close.columns:
-        col = close.columns[0]
+        col = close.columns[0] if len(close.columns) else None
+    if col is None:
+        return None, f"No data returned for {ticker}."
     s = close[col].dropna()
     s.name = ticker
-    return s if not s.empty else None
+    return (s, None) if not s.empty else (None, f"Empty series for {ticker}.")
 
 
 def normalise(series: pd.Series) -> pd.Series:
@@ -98,7 +126,9 @@ def compute_drawdown(series: pd.Series) -> pd.Series:
 def compute_stats(series: pd.Series, label: str) -> dict:
     series = series.dropna()
     if len(series) < 2:
-        return {"Label": label}
+        return {"Label": label, "Total Return": "—", "Ann. Return": "—",
+                "Ann. Volatility": "—", "Sharpe Ratio": "—",
+                "Max Drawdown": "—", "Best Day": "—", "Worst Day": "—", "Days": "0"}
     dr      = series.pct_change().dropna()
     n_years = len(series) / 252
     tr      = series.iloc[-1] / series.iloc[0] - 1

@@ -2,7 +2,7 @@
 tracker/analysis.py  —  Diversification, correlation and stress testing
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -20,7 +20,6 @@ def portfolio_weights(holdings: List[Holding],
 
 
 def concentration_hhi(weights: Dict[str, float]) -> float:
-    """Herfindahl-Hirschman Index × 10,000. Below 1,500 = diversified."""
     return sum(w ** 2 for w in weights.values()) * 10_000
 
 
@@ -93,15 +92,30 @@ def by_sector(holdings: List[Holding], prices: Dict[str, Optional[float]],
                           for k, v in sorted(rows.items(), key=lambda x: -x[1])]) if rows else pd.DataFrame()
 
 
-def fetch_return_matrix(tickers: List[str], period: str = "1y") -> Optional[pd.DataFrame]:
+def fetch_return_matrix(tickers: List[str],
+                        period: str = "1y") -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """
+    Returns (returns_df, None) on success or (None, error_message) on failure.
+    Uses weekly interval to reduce data volume and rate-limit pressure.
+    Drops tickers with insufficient data rather than failing entirely.
+    """
     try:
-        raw = yf.download(tickers, period=period, progress=False, auto_adjust=True)
+        raw = yf.download(tickers, period=period, interval="1wk",
+                          progress=False, auto_adjust=True)
         if raw.empty:
-            return None
+            return None, "No data returned — you may be rate-limited. Try again later."
         close = _close_from_download(raw, tickers)
-        return close.pct_change().dropna()
-    except Exception:
-        return None
+        # Drop tickers with >20% missing values
+        threshold = len(close) * 0.8
+        close = close.dropna(thresh=int(threshold), axis=1)
+        if close.empty or len(close.columns) < 2:
+            return None, "Insufficient data for correlation analysis (need ≥2 tickers with data)."
+        returns = close.pct_change().dropna()
+        if len(returns) < 10:
+            return None, "Too few data points for meaningful correlation analysis."
+        return returns, None
+    except Exception as e:
+        return None, f"Download failed: {e}"
 
 
 def avg_pairwise_correlation(corr: pd.DataFrame) -> float:
@@ -116,7 +130,8 @@ def portfolio_volatility(returns: pd.DataFrame, weights: Dict[str, float]) -> fl
     if not tickers:
         return 0.0
     w   = np.array([weights.get(t, 0) for t in tickers])
-    cov = returns[tickers].cov().values * 252
+    w   = w / w.sum() if w.sum() > 0 else w
+    cov = returns[tickers].cov().values * 52   # weekly → annualised
     return float(np.sqrt(w @ cov @ w))
 
 

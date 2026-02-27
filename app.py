@@ -509,16 +509,18 @@ def render_benchmark():
         return
 
     with st.spinner("Building portfolio value series…"):
-        port_series = build_portfolio_value_series(port, start_date)
-    if port_series is None or port_series.empty:
-        st.error("Could not build portfolio series. Check your ticker symbols."); return
+        port_series, port_warn = build_portfolio_value_series(port, start_date)
+    if port_series is None:
+        st.error(f"Could not build portfolio series: {port_warn}"); return
+    if port_warn:
+        st.warning(port_warn)
 
     index_series: Dict[str, pd.Series] = {}
     for name in selected:
         with st.spinner(f"Fetching {name}…"):
-            s = fetch_index_series(INDICES[name], start_date)
+            s, s_err = fetch_index_series(INDICES[name], start_date)
         if s is not None: index_series[name] = s
-        else:             st.warning(f"Could not fetch {name}")
+        else:             st.warning(f"Could not fetch {name}: {s_err}")
 
     norm_port    = normalise(port_series)
     norm_indices = {n: normalise(s.reindex(port_series.index, method="ffill"))
@@ -663,9 +665,9 @@ def render_analysis():
 
     if st.button("Run Correlation Analysis", type="primary", key="run_corr"):
         with st.spinner("Downloading price data…"):
-            returns = fetch_return_matrix(tickers, period_map[period])
-        if returns is None or returns.empty:
-            st.error("Could not fetch price data.")
+            returns, ret_err = fetch_return_matrix(tickers, period_map[period])
+        if returns is None:
+            st.error(f"Could not fetch price data: {ret_err}")
         else:
             corr  = returns.corr()
             avg_r = avg_pairwise_correlation(corr)
@@ -880,10 +882,10 @@ def render_quant():
     all_tickers  = [h.ticker for h in holdings] + [bench_ticker]
 
     with st.spinner("Downloading weekly price data…"):
-        returns_df = fetch_weekly_returns(all_tickers, period_map[period])
+        returns_df, dl_err = fetch_weekly_returns(all_tickers, period_map[period])
 
-    if returns_df is None or returns_df.empty:
-        st.error("Could not download price data. Try refreshing prices first."); return
+    if returns_df is None:
+        st.error(f"Could not download price data: {dl_err}"); return
 
     # Build portfolio weekly returns (value-weighted)
     prices   = get_prices()

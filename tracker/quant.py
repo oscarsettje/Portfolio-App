@@ -32,22 +32,32 @@ def _weekly_rf() -> float:
     return (1 + RISK_FREE_ANNUAL) ** (1 / WEEKS_PER_YEAR) - 1
 
 
-def fetch_weekly_returns(tickers: list, period: str = "3y") -> Optional[pd.DataFrame]:
+def fetch_weekly_returns(tickers: list, period: str = "3y") -> Tuple[Optional[pd.DataFrame], Optional[str]]:
     """
-    Download weekly close prices and return a DataFrame of weekly % returns.
-    Columns are uppercased ticker names.
+    Download weekly close prices and return (returns_df, None) or (None, error_message).
+    Drops tickers with >20% missing values rather than failing entirely.
     """
     try:
         raw = yf.download(tickers, period=period, interval="1wk",
                           progress=False, auto_adjust=True)
         if raw.empty:
-            return None
+            return None, "No data returned — you may be rate-limited. Try again later."
         close = _close_from_download(raw, tickers)
-        close.index = pd.to_datetime(close.index).tz_localize(None)
-        return close.pct_change().dropna()
+        # Remove timezone if present
+        close.index = pd.to_datetime(close.index)
+        if close.index.tz is not None:
+            close.index = close.index.tz_localize(None)
+        # Drop tickers with insufficient data
+        threshold = len(close) * 0.8
+        close = close.dropna(thresh=int(threshold), axis=1)
+        if close.empty:
+            return None, "All tickers returned insufficient data."
+        returns = close.pct_change().dropna()
+        if len(returns) < 10:
+            return None, "Too few data points — try a longer period."
+        return returns, None
     except Exception as e:
-        print(f"[Warning] fetch_weekly_returns failed: {e}")
-        return None
+        return None, f"Download failed: {e}"
 
 
 # ── Core metrics ──────────────────────────────────────────────────────────────
