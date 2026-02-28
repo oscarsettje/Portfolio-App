@@ -1,9 +1,5 @@
 """
-tracker/prices.py  —  Live price fetching via Yahoo Finance
-
-Price cache is now stored in the SQLite database (price_cache table)
-instead of price_cache.json. Fallback behaviour is unchanged:
-if Yahoo returns nothing, the last known price from the DB is used.
+tracker/prices.py  —  Live price fetching + price cache
 """
 
 from typing import Dict, Optional
@@ -13,15 +9,54 @@ import yfinance as yf
 
 def _close_from_download(raw: pd.DataFrame, tickers: list) -> pd.DataFrame:
     """
-    Extract a (date × ticker) Close DataFrame from yf.download() output.
-    Handles both old flat format and new MultiIndex format (yfinance >= 0.2.40).
+    Extract a clean (date × ticker) Close price DataFrame from yf.download() output.
+
+    yfinance's output format has changed across versions:
+      - Old (< 0.2.40)  : flat columns, "Close" is a column or a Series
+      - New (>= 0.2.40) : MultiIndex columns — (field, ticker) or (ticker, field)
+                          depending on how many tickers were requested
+
+    This function handles all known variants defensively.
     """
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw.xs("Close", axis=1, level=0)
-    else:
-        close = raw["Close"]
+    cols = raw.columns
+
+    if isinstance(cols, pd.MultiIndex):
+        # Determine which level holds the field names ("Close", "Open", etc.)
+        # and which holds the ticker names
+        level0_vals = set(cols.get_level_values(0))
+        level1_vals = set(cols.get_level_values(1))
+
+        if "Close" in level0_vals:
+            # Format: (field, ticker)  — common for multi-ticker downloads
+            close = raw["Close"]
+        elif "Close" in level1_vals:
+            # Format: (ticker, field)  — seen in some yfinance versions
+            close = raw.xs("Close", axis=1, level=1)
+        else:
+            # Fall back: try the first level that has numeric-looking data
+            # by taking the last column of each group
+            raise KeyError(
+                f"Could not find 'Close' in MultiIndex columns. "
+                f"Level 0: {sorted(level0_vals)[:5]}, Level 1: {sorted(level1_vals)[:5]}"
+            )
+
         if isinstance(close, pd.Series):
             close = close.to_frame(name=tickers[0].upper())
+
+    else:
+        # Flat column format (single ticker or old yfinance)
+        if "Close" in cols:
+            close = raw[["Close"]].copy()
+            close.columns = [tickers[0].upper()]
+        elif "close" in [c.lower() for c in cols]:
+            col = next(c for c in cols if c.lower() == "close")
+            close = raw[[col]].copy()
+            close.columns = [tickers[0].upper()]
+        else:
+            # Last resort: assume the data IS the close prices
+            close = raw.copy()
+
+    # Normalise column names to uppercase tickers
     close.columns = [str(c).upper() for c in close.columns]
     return close
 
@@ -60,7 +95,6 @@ class PriceFetcher:
                 return float(price)
         except Exception as e:
             print(f"[Warning] Could not fetch {ticker}: {e}")
-        # Fall back to cached price (already in _cache from __init__)
         return self._cache.get(ticker)
 
     def get_prices(self, tickers: list) -> Dict[str, Optional[float]]:
@@ -78,14 +112,12 @@ class PriceFetcher:
                             series = close[ticker].dropna()
                             if not series.empty:
                                 fresh[ticker] = float(series.iloc[-1])
-                    # Batch-write to DB in one transaction
                     if fresh and self._db is not None:
                         self._db.set_prices(fresh)
                     self._cache.update(fresh)
             except Exception as e:
                 print(f"[Warning] Batch fetch failed: {e}")
 
-        # Individual fallback for anything still missing
         for ticker in to_fetch:
             if ticker not in self._cache:
                 self.get_price(ticker)
@@ -95,6 +127,6 @@ class PriceFetcher:
     def clear_cache(self):
         """Clear in-memory cache only — DB cache is always preserved."""
         self._cache.clear()
-        # Reload last-known prices from DB so fallback still works
+        self._fresh.clear()
         if self._db is not None:
             self._cache.update(self._db.get_price_cache())

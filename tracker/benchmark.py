@@ -31,19 +31,24 @@ def _download_close(tickers: list, start: str) -> Tuple[Optional[pd.DataFrame], 
     Silently drops tickers that returned no data rather than failing entirely.
     """
     try:
-        raw = yf.download(tickers, start=start, progress=False,
-                          auto_adjust=True, group_by="ticker")
+        raw = yf.download(tickers, start=start, progress=False, auto_adjust=True)
         if raw.empty:
-            return None, "Yahoo Finance returned no data. You may be rate-limited — try again later."
+            return None, ("Yahoo Finance returned no data. "
+                          "You may be rate-limited — wait ~60 min and try again.")
         close = _close_from_download(raw, tickers)
         close.index = _safe_tz(pd.to_datetime(close.index))
-        # Drop columns that are all NaN (tickers with no data)
         close = close.dropna(axis=1, how="all")
         if close.empty:
-            return None, "All tickers returned empty data."
+            return None, "All tickers returned empty data after processing."
         return close, None
+    except KeyError as e:
+        return None, (f"Data processing error (not a rate limit): {e}. "
+                      f"Try upgrading yfinance: pip install yfinance --upgrade")
     except Exception as e:
-        return None, str(e)
+        msg = str(e)
+        if "rate" in msg.lower() or "too many" in msg.lower() or "429" in msg:
+            return None, "Rate-limited by Yahoo Finance — wait ~60 min and try again."
+        return None, f"Download error: {msg}"
 
 
 def build_portfolio_value_series(

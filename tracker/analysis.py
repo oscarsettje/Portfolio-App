@@ -103,19 +103,25 @@ def fetch_return_matrix(tickers: List[str],
         raw = yf.download(tickers, period=period, interval="1wk",
                           progress=False, auto_adjust=True)
         if raw.empty:
-            return None, "No data returned — you may be rate-limited. Try again later."
+            return None, ("No data returned — you may be rate-limited. "
+                          "Wait ~60 min and try again.")
         close = _close_from_download(raw, tickers)
-        # Drop tickers with >20% missing values
         threshold = len(close) * 0.8
         close = close.dropna(thresh=int(threshold), axis=1)
         if close.empty or len(close.columns) < 2:
-            return None, "Insufficient data for correlation analysis (need ≥2 tickers with data)."
+            return None, "Insufficient data (need ≥2 tickers). Check ticker symbols."
         returns = close.pct_change().dropna()
         if len(returns) < 10:
-            return None, "Too few data points for meaningful correlation analysis."
+            return None, "Too few data points — try a longer period."
         return returns, None
+    except KeyError as e:
+        return None, (f"Data processing error (not a rate limit): {e}. "
+                      f"Try upgrading yfinance: pip install yfinance --upgrade")
     except Exception as e:
-        return None, f"Download failed: {e}"
+        msg = str(e)
+        if "rate" in msg.lower() or "too many" in msg.lower() or "429" in msg:
+            return None, "Rate-limited by Yahoo Finance — wait ~60 min and try again."
+        return None, f"Download error: {msg}"
 
 
 def avg_pairwise_correlation(corr: pd.DataFrame) -> float:
