@@ -64,7 +64,9 @@ if "portfolio"    not in st.session_state: st.session_state.portfolio    = Portf
 if "prices"       not in st.session_state: st.session_state.prices       = {}
 if "news_cache"   not in st.session_state: st.session_state.news_cache   = {}
 if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
-if "stale_prices" not in st.session_state: st.session_state.stale_prices = set()
+if "stale_prices"    not in st.session_state: st.session_state.stale_prices    = set()
+if "bench_cache"     not in st.session_state: st.session_state.bench_cache     = {}
+if "quant_cache"     not in st.session_state: st.session_state.quant_cache     = {}
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
 def fetcher()   -> PriceFetcher: return st.session_state.fetcher
@@ -505,22 +507,51 @@ def render_benchmark():
 
     st.info(f"Benchmarking from **{start_date.strftime('%d %b %Y')}**")
     selected = st.multiselect("Compare against", list(INDICES.keys()), list(INDICES.keys()))
-    if not st.button("Run Benchmark", type="primary"):
+
+    cache = st.session_state.bench_cache
+    has_cache = "port_series" in cache
+
+    col_run, col_clear = st.columns([1, 1])
+    run_clicked   = col_run.button("Run Benchmark", type="primary", disabled=has_cache)
+    clear_clicked = col_clear.button("🔄 Re-fetch Data", disabled=not has_cache,
+                                     help="Clear cached data and download fresh from Yahoo Finance")
+
+    if clear_clicked:
+        st.session_state.bench_cache = {}
+        st.rerun()
+
+    if not has_cache and not run_clicked:
+        st.caption("Click **Run Benchmark** to fetch data. Results are cached so "
+                   "re-runs won't count against the Yahoo Finance rate limit.")
         return
 
-    with st.spinner("Building portfolio value series…"):
-        port_series, port_warn = build_portfolio_value_series(port, start_date)
-    if port_series is None:
-        st.error(f"Could not build portfolio series: {port_warn}"); return
-    if port_warn:
-        st.warning(port_warn)
+    if run_clicked and not has_cache:
+        with st.spinner("Building portfolio value series…"):
+            port_series, port_warn = build_portfolio_value_series(port, start_date)
+        if port_series is None:
+            st.error(f"Could not build portfolio series: {port_warn}"); return
+        if port_warn:
+            st.warning(port_warn)
 
-    index_series: Dict[str, pd.Series] = {}
-    for name in selected:
-        with st.spinner(f"Fetching {name}…"):
-            s, s_err = fetch_index_series(INDICES[name], start_date)
-        if s is not None: index_series[name] = s
-        else:             st.warning(f"Could not fetch {name}: {s_err}")
+        index_series: Dict[str, pd.Series] = {}
+        for name in selected:
+            with st.spinner(f"Fetching {name}…"):
+                s, s_err = fetch_index_series(INDICES[name], start_date)
+            if s is not None: index_series[name] = s
+            else:             st.warning(f"Could not fetch {name}: {s_err}")
+
+        # Store in session cache — survives Streamlit reruns within the session
+        st.session_state.bench_cache = {
+            "port_series":  port_series,
+            "index_series": index_series,
+            "selected":     selected,
+        }
+        cache = st.session_state.bench_cache
+
+    port_series  = cache["port_series"]
+    index_series = cache.get("index_series", {})
+    # Filter to currently selected indices
+    index_series = {n: s for n, s in index_series.items() if n in selected}
 
     norm_port    = normalise(port_series)
     norm_indices = {n: normalise(s.reindex(port_series.index, method="ffill"))
@@ -663,12 +694,32 @@ def render_analysis():
     period = st.radio("Data period", list(period_map.keys()), index=2,
                       horizontal=True, key="corr_period")
 
-    if st.button("Run Correlation Analysis", type="primary", key="run_corr"):
+    corr_cache    = st.session_state.get("corr_cache", {})
+    corr_key      = f"{','.join(sorted(tickers))}_{period}"
+    has_corr      = corr_cache.get("key") == corr_key
+
+    c_run, c_clear = st.columns([1,1])
+    run_corr    = c_run.button("Run Correlation Analysis", type="primary",
+                                key="run_corr", disabled=has_corr)
+    clear_corr  = c_clear.button("🔄 Re-fetch", key="clear_corr", disabled=not has_corr,
+                                  help="Download fresh data")
+    if clear_corr:
+        st.session_state.corr_cache = {}; st.rerun()
+
+    if not has_corr and not run_corr:
+        st.caption("Click **Run Correlation Analysis** to fetch data. Results are cached.")
+    elif run_corr and not has_corr:
         with st.spinner("Downloading price data…"):
             returns, ret_err = fetch_return_matrix(tickers, period_map[period])
         if returns is None:
             st.error(f"Could not fetch price data: {ret_err}")
         else:
+            st.session_state.corr_cache = {"key": corr_key, "returns": returns}
+            has_corr = True
+
+    if has_corr:
+        returns = st.session_state.corr_cache["returns"]
+        if True:
             corr  = returns.corr()
             avg_r = avg_pairwise_correlation(corr)
             vol   = portfolio_volatility(returns, weights)
@@ -875,17 +926,33 @@ def render_quant():
                               format="%.2f") / 100
 
     period_map = {"1Y":"1y","2Y":"2y","3Y":"3y","5Y":"5y"}
-    if not st.button("Compute Metrics", type="primary"):
+    quant_key = f"{','.join(sorted(h.ticker for h in holdings))}_{bench_name}_{period}"
+    qcache    = st.session_state.quant_cache
+    has_qdata = qcache.get("key") == quant_key
+
+    q_run, q_clear = st.columns([1,1])
+    run_quant   = q_run.button("Compute Metrics", type="primary", disabled=has_qdata)
+    clear_quant = q_clear.button("🔄 Re-fetch Data", disabled=not has_qdata,
+                                  help="Download fresh data from Yahoo Finance")
+    if clear_quant:
+        st.session_state.quant_cache = {}; st.rerun()
+
+    if not has_qdata and not run_quant:
+        st.caption("Click **Compute Metrics** to fetch data. Results are cached for the session.")
         return
 
     bench_ticker = INDICES[bench_name]
     all_tickers  = [h.ticker for h in holdings] + [bench_ticker]
 
-    with st.spinner("Downloading weekly price data…"):
-        returns_df, dl_err = fetch_weekly_returns(all_tickers, period_map[period])
+    if run_quant and not has_qdata:
+        with st.spinner("Downloading weekly price data…"):
+            returns_df, dl_err = fetch_weekly_returns(all_tickers, period_map[period])
+        if returns_df is None:
+            st.error(f"Could not download price data: {dl_err}"); return
+        st.session_state.quant_cache = {"key": quant_key, "returns_df": returns_df}
+        qcache = st.session_state.quant_cache
 
-    if returns_df is None:
-        st.error(f"Could not download price data: {dl_err}"); return
+    returns_df = qcache["returns_df"]
 
     # Build portfolio weekly returns (value-weighted)
     prices   = get_prices()
