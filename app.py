@@ -145,20 +145,87 @@ def _section(title: str):
     st.markdown(f'<p class="section-title">{title}</p>', unsafe_allow_html=True)
 
 # ── News ──────────────────────────────────────────────────────────────────────
+def _normalise_article(raw: dict, ticker: str) -> Optional[dict]:
+    """
+    Normalise a yfinance news article into a consistent format.
+
+    yfinance changed its news response structure in v0.2.40:
+      Old: flat dict  — title, link, publisher, providerPublishTime (unix ts)
+      New: nested     — content.title, content.canonicalUrl.url,
+                        content.provider.displayName, content.pubDate (ISO str)
+
+    Returns None if the article is missing essential fields.
+    """
+    # ── New nested format (yfinance >= 0.2.40) ──
+    if "content" in raw and isinstance(raw["content"], dict):
+        c = raw["content"]
+        title = c.get("title", "").strip()
+        if not title:
+            return None
+        # URL: prefer landingPageUrl (full article), fallback to canonicalUrl
+        url_obj = c.get("canonicalUrl") or {}
+        link    = url_obj.get("landingPageUrl") or url_obj.get("url") or "#"
+        pub     = (c.get("provider") or {}).get("displayName", "")
+        # pubDate is ISO 8601 string e.g. "2024-11-14T10:30:00Z"
+        pub_date = c.get("pubDate", "")
+        try:
+            from datetime import timezone
+            ts = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+            pub_time = ts.astimezone(timezone.utc).strftime("%d %b %Y  %H:%M")
+        except Exception:
+            pub_time = pub_date[:10] if pub_date else ""
+        return {"title": title, "link": link, "publisher": pub,
+                "pub_time": pub_time, "_ticker": ticker}
+
+    # ── Old flat format (yfinance < 0.2.40) ──
+    title = raw.get("title", "").strip()
+    if not title:
+        return None
+    link = raw.get("link") or raw.get("url") or "#"
+    pub  = raw.get("publisher") or raw.get("source") or ""
+    try:
+        ts       = raw.get("providerPublishTime") or 0
+        pub_time = datetime.fromtimestamp(ts).strftime("%d %b %Y  %H:%M") if ts else ""
+    except Exception:
+        pub_time = ""
+    return {"title": title, "link": link, "publisher": pub,
+            "pub_time": pub_time, "_ticker": ticker,
+            "_ts": raw.get("providerPublishTime", 0)}
+
+
 def _fetch_news(tickers: List[str]) -> List[dict]:
     cache, all_news = st.session_state.news_cache, []
     for ticker in tickers:
         if ticker not in cache:
-            try:    cache[ticker] = yf.Ticker(ticker).news or []
-            except: cache[ticker] = []
-        for a in cache[ticker][:5]:
-            all_news.append({**a, "_ticker": ticker})
-    all_news.sort(key=lambda x: x.get("providerPublishTime", 0), reverse=True)
+            try:
+                raw_list = yf.Ticker(ticker).news or []
+                cache[ticker] = raw_list
+            except Exception as e:
+                print(f"[Warning] News fetch failed for {ticker}: {e}")
+                cache[ticker] = []
+        for raw in cache[ticker][:6]:
+            article = _normalise_article(raw, ticker)
+            if article:
+                all_news.append(article)
+
+    # Sort by timestamp descending — use _ts for old format, pub_time string for new
+    def _sort_key(a):
+        if "_ts" in a and a["_ts"]:
+            return a["_ts"]
+        # Parse pub_time string as fallback sort key
+        try:
+            return datetime.strptime(a["pub_time"], "%d %b %Y  %H:%M").timestamp()
+        except Exception:
+            return 0
+    all_news.sort(key=_sort_key, reverse=True)
+
+    # Deduplicate by title
     seen, unique = set(), []
     for a in all_news:
-        if (t := a.get("title","")) not in seen:
-            seen.add(t); unique.append(a)
+        if a["title"] not in seen:
+            seen.add(a["title"]); unique.append(a)
     return unique[:20]
+
 
 def _render_news(tickers: List[str]):
     _section("Latest News")
@@ -169,14 +236,13 @@ def _render_news(tickers: List[str]):
     with st.spinner("Loading news…"):
         articles = _fetch_news(tickers)
     if not articles:
-        st.caption("No news found."); return
+        st.caption("No news available for your holdings right now.")
+        return
     for a in articles:
-        try:    pub = datetime.fromtimestamp(a.get("providerPublishTime",0)).strftime("%d %b %Y  %H:%M")
-        except: pub = ""
         st.markdown(f"""<div class="news-card">
-  <span class="news-ticker">{a.get("_ticker","")}</span>
-  <a href="{a.get("link","#")}" target="_blank">{a.get("title","")}</a>
-  <div class="news-meta">{a.get("publisher","")}  ·  {pub}</div>
+  <span class="news-ticker">{a["_ticker"]}</span>
+  <a href="{a["link"]}" target="_blank">{a["title"]}</a>
+  <div class="news-meta">{a["publisher"]}{"  ·  " if a["publisher"] else ""}{a["pub_time"]}</div>
 </div>""", unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -206,80 +272,253 @@ def render_sidebar():
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 def render_dashboard():
-    st.markdown("## Dashboard")
-    holdings = portfolio().all_holdings()
-    prices   = get_prices()
+    holdings  = portfolio().all_holdings()
+    prices    = get_prices()
+    snapshots = portfolio().snapshots
+    dividends = portfolio().all_dividends()
+
     if not holdings:
+        st.markdown("## Dashboard")
         st.info("Your portfolio is empty. Go to **Add Transaction** to get started.")
         return
-    tv  = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
-    ti  = sum(h.total_invested for h in holdings)
-    pnl = tv - ti
 
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Total Invested",  fmt_cur(ti))
-    c2.metric("Portfolio Value", fmt_cur(tv))
-    c3.metric("Unrealised P&L",  fmt_cur(pnl), delta=fmt_pct(pnl/ti*100 if ti else 0))
-    c4.metric("Holdings",        str(len(holdings)))
+    # ── Core calculations ──────────────────────────────────────────────────────
+    tv       = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
+    ti       = sum(h.total_invested for h in holdings)
+    pnl      = tv - ti
+    pnl_pct  = pnl / ti * 100 if ti else 0
+    total_div = sum(d.net_amount for d in dividends)
+    total_comm = sum(h.total_commissions for h in holdings)
+    n_gains  = sum(1 for h in holdings if prices.get(h.ticker) and h.unrealised_pnl(prices[h.ticker]) > 0)
+    n_losses = len(holdings) - n_gains
+    best_h   = max(holdings, key=lambda h: h.pnl_percent(prices[h.ticker]) if prices.get(h.ticker) else -999, default=None)
+    worst_h  = min(holdings, key=lambda h: h.pnl_percent(prices[h.ticker]) if prices.get(h.ticker) else 999, default=None)
+
+    # ── Row 1: Headline metrics ────────────────────────────────────────────────
+    st.markdown("""
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:1.2rem">
+      <span style="font-size:1.6rem;font-weight:700;color:#eee">Dashboard</span>
+    </div>""", unsafe_allow_html=True)
+
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("Portfolio Value",  fmt_cur(tv))
+    c2.metric("Total Invested",   fmt_cur(ti))
+    c3.metric("Unrealised P&L",   fmt_cur(pnl),
+              delta=fmt_pct(pnl_pct),
+              delta_color="normal")
+    c4.metric("Dividend Income",  fmt_cur(total_div),
+              help="Total net dividends received (after withholding tax)")
+    c5.metric("Commissions Paid", fmt_cur(total_comm),
+              help="Total broker fees — already factored into cost basis")
+    c6.metric("Holdings",
+              f"{len(holdings)}",
+              delta=f"{n_gains}↑  {n_losses}↓",
+              delta_color="off",
+              help=f"{n_gains} in profit, {n_losses} in loss")
+
+    # ── Row 2: Best / Worst callout strip ─────────────────────────────────────
+    if best_h and worst_h and best_h.ticker != worst_h.ticker:
+        bp = prices.get(best_h.ticker)
+        wp = prices.get(worst_h.ticker)
+        st.markdown(f"""
+        <div style="display:flex;gap:12px;margin:0.8rem 0">
+          <div style="flex:1;background:#0d1f14;border:1px solid #1a3a22;border-radius:8px;padding:10px 16px">
+            <span style="font-size:.7rem;color:#4caf7d;font-weight:700;letter-spacing:.08em">TOP PERFORMER</span><br>
+            <span style="font-size:1.1rem;font-weight:700;color:#eee">{best_h.ticker}</span>
+            <span style="font-size:.85rem;color:#aaa;margin-left:8px">{best_h.name}</span>
+            <span style="float:right;font-size:1.05rem;font-weight:700;color:#4caf7d">
+              {fmt_pct(best_h.pnl_percent(bp))}&nbsp;&nbsp;{fmt_cur(best_h.unrealised_pnl(bp))}
+            </span>
+          </div>
+          <div style="flex:1;background:#1f0d0d;border:1px solid #3a1a1a;border-radius:8px;padding:10px 16px">
+            <span style="font-size:.7rem;color:#e05c5c;font-weight:700;letter-spacing:.08em">LAGGING</span><br>
+            <span style="font-size:1.1rem;font-weight:700;color:#eee">{worst_h.ticker}</span>
+            <span style="font-size:.85rem;color:#aaa;margin-left:8px">{worst_h.name}</span>
+            <span style="float:right;font-size:1.05rem;font-weight:700;color:#e05c5c">
+              {fmt_pct(worst_h.pnl_percent(wp))}&nbsp;&nbsp;{fmt_cur(worst_h.unrealised_pnl(wp))}
+            </span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
     st.divider()
 
-    col_l, col_r = st.columns(2)
-    with col_l: _chart_allocation(holdings, prices)
-    with col_r: _chart_pnl_bars(holdings, prices)
+    # ── Row 3: Allocation donut + Holdings scorecard ───────────────────────────
+    col_l, col_r = st.columns([1, 1.6])
+
+    with col_l:
+        _section("Allocation")
+        labels, values, colours = [], [], []
+        for i, h in enumerate(sorted(holdings, key=lambda h: h.current_value(prices.get(h.ticker,0) or 0), reverse=True)):
+            if not (p := prices.get(h.ticker)): continue
+            labels.append(h.ticker)
+            values.append(h.current_value(p))
+            colours.append(PALETTE[i % len(PALETTE)])
+        if values:
+            fig = go.Figure(go.Pie(
+                labels=labels, values=values, hole=0.6,
+                marker=dict(colors=colours, line=dict(color=BG, width=2)),
+                textinfo="label+percent", textfont_size=11,
+                hovertemplate="<b>%{label}</b><br>€%{value:,.2f}  ·  %{percent}<extra></extra>"))
+            fig.update_layout(**_chart_layout(height=300))
+            fig.update_layout(showlegend=False, margin=dict(t=10,b=10,l=10,r=10),
+                annotations=[dict(
+                    text=f"<b>{fmt_cur(tv)}</b>", x=0.5, y=0.52,
+                    font_size=14, showarrow=False, font_color="#cccccc"),
+                  dict(text="total", x=0.5, y=0.42,
+                    font_size=11, showarrow=False, font_color="#555")])
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        _section("Holdings at a Glance")
+        sorted_holdings = sorted(
+            [h for h in holdings if prices.get(h.ticker)],
+            key=lambda h: h.current_value(prices[h.ticker]),
+            reverse=True
+        )
+        total_val = tv or 1
+        for h in sorted_holdings:
+            p      = prices[h.ticker]
+            val    = h.current_value(p)
+            upnl   = h.unrealised_pnl(p)
+            pct    = h.pnl_percent(p)
+            weight = val / total_val * 100
+            bar_w  = max(2, int(abs(pct) / max(abs(h2.pnl_percent(prices[h2.ticker]))
+                         for h2 in sorted_holdings if prices.get(h2.ticker)) * 60))
+            colour = GAIN if upnl >= 0 else LOSS
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 0;
+                        border-bottom:1px solid #1a1a1a">
+              <div style="width:52px;font-size:.8rem;font-weight:700;color:#ccc">{h.ticker}</div>
+              <div style="width:36px;font-size:.7rem;color:#555;text-align:right">{weight:.1f}%</div>
+              <div style="flex:1;background:#111;border-radius:3px;height:6px;overflow:hidden">
+                <div style="width:{bar_w}%;height:100%;background:{colour};border-radius:3px"></div>
+              </div>
+              <div style="width:80px;text-align:right;font-size:.82rem;color:#bbb">{fmt_cur(val)}</div>
+              <div style="width:72px;text-align:right;font-size:.82rem;font-weight:600;
+                          color:{colour}">{fmt_pct(pct)}</div>
+              <div style="width:82px;text-align:right;font-size:.8rem;color:{colour}">{fmt_cur(upnl)}</div>
+            </div>""", unsafe_allow_html=True)
+
     st.divider()
-    _chart_value(holdings, prices)
+
+    # ── Row 4: Snapshot value history OR invested vs value ────────────────────
+    if len(snapshots) >= 2:
+        _section("Portfolio Value Over Time")
+        snap_dates  = [s.date for s in snapshots]
+        snap_values = [s.total_value for s in snapshots]
+        snap_inv    = [s.total_invested for s in snapshots]
+        fig_snap = go.Figure()
+        fig_snap.add_trace(go.Scatter(
+            x=snap_dates, y=snap_values, name="Portfolio Value",
+            line=dict(color=BLUE, width=2.5),
+            fill="tozeroy", fillcolor="rgba(91,155,213,0.07)",
+            hovertemplate="%{x}<br>Value: €%{y:,.2f}<extra></extra>"))
+        fig_snap.add_trace(go.Scatter(
+            x=snap_dates, y=snap_inv, name="Invested",
+            line=dict(color="#555", width=1.5, dash="dot"),
+            hovertemplate="%{x}<br>Invested: €%{y:,.2f}<extra></extra>"))
+        # Add current value as a dot at today
+        fig_snap.add_trace(go.Scatter(
+            x=[date.today().isoformat()], y=[tv],
+            name="Today", mode="markers",
+            marker=dict(color=GAIN if pnl >= 0 else LOSS, size=10),
+            hovertemplate=f"Today<br>Value: {fmt_cur(tv)}<extra></extra>"))
+        fig_snap.update_layout(**_chart_layout(height=300))
+        fig_snap.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+        st.plotly_chart(fig_snap, use_container_width=True)
+        st.caption(f"Based on {len(snapshots)} manual snapshots. Use **Snapshot History** to add more.")
+    else:
+        _section("Invested vs Current Value")
+        rows = sorted(
+            [(h.ticker, h.total_invested, h.current_value(p))
+             for h in holdings if (p := prices.get(h.ticker))],
+            key=lambda x: x[2], reverse=True)
+        if rows:
+            tickers, inv, cur = zip(*rows)
+            fig_v = go.Figure()
+            fig_v.add_trace(go.Bar(name="Cost Basis", x=list(tickers), y=list(inv),
+                marker_color=BLUE, opacity=0.6,
+                hovertemplate="<b>%{x}</b><br>Cost basis: €%{y:,.2f}<extra></extra>"))
+            fig_v.add_trace(go.Bar(name="Current Value", x=list(tickers), y=list(cur),
+                marker_color=[GAIN if c >= i else LOSS for c, i in zip(cur, inv)],
+                hovertemplate="<b>%{x}</b><br>Value: €%{y:,.2f}<extra></extra>"))
+            fig_v.update_layout(**_chart_layout(height=300))
+            fig_v.update_layout(barmode="group", yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+            st.plotly_chart(fig_v, use_container_width=True)
+        if len(snapshots) == 0:
+            st.caption("💡 Add manual snapshots in **Snapshot History** to track portfolio value over time.")
+        else:
+            st.caption("Add at least 2 snapshots in **Snapshot History** to see a value chart here.")
+
+    # ── Row 5: P&L waterfall + Asset type breakdown ───────────────────────────
+    st.divider()
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        _section("P&L by Holding")
+        rows_pnl = sorted(
+            [(h.ticker, h.unrealised_pnl(p), h.pnl_percent(p))
+             for h in holdings if (p := prices.get(h.ticker))],
+            key=lambda x: x[1], reverse=True)
+        if rows_pnl:
+            tickers_p, pnls_p, pcts_p = zip(*rows_pnl)
+            fig_pnl = go.Figure(go.Bar(
+                x=list(pnls_p), y=list(tickers_p), orientation="h",
+                marker_color=[GAIN if p >= 0 else LOSS for p in pnls_p],
+                text=[fmt_pct(p) for p in pcts_p],
+                textposition="outside",
+                textfont=dict(size=10, color="#aaa"),
+                hovertemplate="<b>%{y}</b><br>P&L: €%{x:,.2f}<extra></extra>"))
+            fig_pnl.update_layout(**_chart_layout(height=max(220, len(rows_pnl)*38)))
+            fig_pnl.update_layout(xaxis=dict(gridcolor="#1e1e1e", tickprefix="€",
+                                             zeroline=True, zerolinecolor="#444"))
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+    with col_b:
+        _section("Exposure by Asset Type")
+        type_vals: Dict[str, float] = {}
+        for h in holdings:
+            if (p := prices.get(h.ticker)):
+                t = h.asset_type.upper()
+                type_vals[t] = type_vals.get(t, 0) + h.current_value(p)
+        if type_vals:
+            labels_t  = list(type_vals.keys())
+            values_t  = list(type_vals.values())
+            colours_t = [PALETTE[i % len(PALETTE)] for i in range(len(labels_t))]
+            fig_type = go.Figure(go.Pie(
+                labels=labels_t, values=values_t, hole=0.5,
+                marker=dict(colors=colours_t, line=dict(color=BG, width=2)),
+                textinfo="label+percent",
+                hovertemplate="<b>%{label}</b><br>€%{value:,.2f}  ·  %{percent}<extra></extra>"))
+            fig_type.update_layout(**_chart_layout(height=max(220, len(rows_pnl)*38) if rows_pnl else 220))
+            fig_type.update_layout(showlegend=True,
+                legend=dict(orientation="h", y=-0.1))
+            st.plotly_chart(fig_type, use_container_width=True)
+
+    # ── Row 6: Dividends bar (only if any recorded) ───────────────────────────
+    if dividends:
+        st.divider()
+        _section("Dividend Income by Year")
+        by_year: Dict[str, float] = {}
+        for d in dividends:
+            y = d.date[:4]
+            by_year[y] = by_year.get(y, 0) + d.net_amount
+        years  = sorted(by_year.keys())
+        fig_div = go.Figure(go.Bar(
+            x=years, y=[by_year[y] for y in years],
+            marker_color=GAIN,
+            text=[fmt_cur(by_year[y]) for y in years],
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>Net dividends: €%{y:,.2f}<extra></extra>"))
+        fig_div.update_layout(**_chart_layout(height=240))
+        fig_div.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+        st.plotly_chart(fig_div, use_container_width=True)
+
+    # ── Row 7: News ───────────────────────────────────────────────────────────
     st.divider()
     _render_news([h.ticker for h in holdings])
 
 
-def _chart_allocation(holdings, prices):
-    labels, values, colours = [], [], []
-    for i, h in enumerate(holdings):
-        if (p := prices.get(h.ticker)) is None: continue
-        labels.append(h.ticker)
-        values.append(h.current_value(p))
-        colours.append(PALETTE[i % len(PALETTE)])
-    if not values: return
-    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.55,
-        marker=dict(colors=colours, line=dict(color=BG, width=2)),
-        textinfo="label+percent",
-        hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<br>%{percent}<extra></extra>"))
-    fig.update_layout(**_chart_layout("Allocation", 320))
-    fig.update_layout(showlegend=False,
-        annotations=[dict(text=f"€{sum(values):,.0f}", x=0.5, y=0.5,
-                          font_size=16, showarrow=False, font_color="#cccccc")])
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _chart_pnl_bars(holdings, prices):
-    rows = [(h.ticker, h.unrealised_pnl(p))
-            for h in holdings if (p := prices.get(h.ticker)) is not None]
-    if not rows: return
-    tickers, pnls = zip(*rows)
-    fig = go.Figure(go.Bar(x=list(pnls), y=list(tickers), orientation="h",
-        marker_color=[GAIN if p >= 0 else LOSS for p in pnls],
-        hovertemplate="<b>%{y}</b><br>€%{x:,.2f}<extra></extra>"))
-    fig.update_layout(**_chart_layout("Unrealised P&L", 320))
-    fig.update_layout(xaxis=dict(gridcolor="#1e1e1e", tickprefix="€",
-                                 zeroline=True, zerolinecolor="#444"))
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _chart_value(holdings, prices):
-    rows = [(h.ticker, h.total_invested, h.current_value(p))
-            for h in holdings if (p := prices.get(h.ticker)) is not None]
-    if not rows: return
-    tickers, inv, cur = zip(*rows)
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name="Invested", x=list(tickers), y=list(inv),
-        marker_color=BLUE, opacity=0.75,
-        hovertemplate="<b>%{x}</b><br>Invested: €%{y:,.2f}<extra></extra>"))
-    fig.add_trace(go.Bar(name="Current Value", x=list(tickers), y=list(cur),
-        marker_color=[GAIN if c >= i else LOSS for c, i in zip(cur, inv)],
-        hovertemplate="<b>%{x}</b><br>Value: €%{y:,.2f}<extra></extra>"))
-    fig.update_layout(**_chart_layout("Invested vs Current Value", 320))
-    fig.update_layout(barmode="group", yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
-    st.plotly_chart(fig, use_container_width=True)
 
 # ── Holdings ──────────────────────────────────────────────────────────────────
 def render_holdings():
