@@ -19,6 +19,8 @@ from tracker.benchmark import (
 from tracker.models import Holding, Snapshot, Transaction
 from tracker.portfolio import Portfolio
 from tracker.db import Database
+from tracker.validation import (validate_ticker, validate_transaction,
+    validate_transaction_list, validate_dividend, validate_name)
 from tracker.prices import PriceFetcher, _close_from_download
 import tracker.exporter as exporter
 
@@ -631,15 +633,33 @@ def render_holdings():
                                     commission=float(r.get("Commission", 0) or 0))
                         for _, r in edited_df.dropna(subset=["Date","Action","Quantity","Price"]).iterrows()
                     ]
-                    portfolio().replace_transactions(h.ticker, new_txns)
-                    invalidate_prices()
-                    st.success("✓ Saved"); st.rerun()
+                    errors = validate_transaction_list(h.ticker, new_txns)
+                    if errors:
+                        for e in errors:
+                            st.error(e)
+                    else:
+                        portfolio().replace_transactions(h.ticker, new_txns)
+                        invalidate_prices()
+                        st.success("✓ Saved"); st.rerun()
 
-            col_del, _ = st.columns([1, 4])
+            col_del, col_conf, _ = st.columns([1, 1.5, 2.5])
             with col_del:
-                if st.button(f"🗑  Remove {h.ticker}", key=f"remove_{h.ticker}"):
+                remove_clicked = st.button(f"🗑  Remove {h.ticker}",
+                                           key=f"remove_{h.ticker}",
+                                           help="Permanently delete this holding and all its transactions")
+            if remove_clicked:
+                st.session_state[f"confirm_remove_{h.ticker}"] = True
+            if st.session_state.get(f"confirm_remove_{h.ticker}"):
+                with col_conf:
+                    st.warning(f"Delete all {h.ticker} data?")
+                c_yes, c_no = st.columns(2)
+                if c_yes.button("Yes, delete", key=f"yes_remove_{h.ticker}", type="primary"):
                     portfolio().remove_holding(h.ticker)
+                    st.session_state.pop(f"confirm_remove_{h.ticker}", None)
                     invalidate_prices(); st.rerun()
+                if c_no.button("Cancel", key=f"no_remove_{h.ticker}"):
+                    st.session_state.pop(f"confirm_remove_{h.ticker}", None)
+                    st.rerun()
 
 
 def _chart_price_history(ticker: str, period: str, transactions=None):
@@ -704,12 +724,25 @@ def render_add_transaction():
             txn_date   = st.date_input("Date", value=date.today())
 
         if st.form_submit_button("Add Transaction", use_container_width=True, type="primary"):
-            if not ticker:
-                st.error("Please enter a ticker symbol.")
-            elif ticker not in existing and not name:
-                st.error("Please enter a name for the new holding.")
+            h = existing.get(ticker)
+            # Collect all validation errors before showing any
+            errors = []
+            errors += validate_ticker(ticker)
+            if not errors:  # only validate name if ticker is ok
+                if ticker not in existing:
+                    errors += validate_name(name)
+                errors += validate_transaction(
+                    action=action.lower(),
+                    quantity=quantity,
+                    price=price,
+                    txn_date=txn_date,
+                    commission=commission,
+                    holding=h,
+                )
+            if errors:
+                for e in errors:
+                    st.error(e)
             else:
-                h = existing.get(ticker)
                 portfolio().add_transaction(
                     ticker=ticker,
                     name=h.name if h else name,
@@ -719,7 +752,7 @@ def render_add_transaction():
                 )
                 invalidate_prices()
                 st.session_state.news_cache = {}
-                st.success(f"✓ {action} recorded for {ticker}")
+                st.success(f"✓ {action} {quantity:,.4f} × {ticker} @ {fmt_cur(price)} recorded.")
                 st.rerun()
 
     with st.expander("📖  Ticker format guide"):
@@ -1122,8 +1155,16 @@ def render_snapshot_history():
         c_note.caption("Note");     c_note.write(s.note or "—")
         with c_del:
             st.write("")
-            if st.button("✕", key=f"del_snap_{real_idx}", help="Delete"):
-                portfolio().delete_snapshot(real_idx); st.rerun()
+            if st.button("✕", key=f"del_snap_{real_idx}", help="Delete snapshot"):
+                st.session_state[f"confirm_snap_{real_idx}"] = True
+        if st.session_state.get(f"confirm_snap_{real_idx}"):
+            st.warning(f"Delete snapshot from {s.date}?")
+            cy2, cn2 = st.columns(2)
+            if cy2.button("Yes, delete", key=f"yes_snap_{real_idx}", type="primary"):
+                portfolio().delete_snapshot(real_idx)
+                st.session_state.pop(f"confirm_snap_{real_idx}", None); st.rerun()
+            if cn2.button("Cancel", key=f"no_snap_{real_idx}"):
+                st.session_state.pop(f"confirm_snap_{real_idx}", None); st.rerun()
 
 # ── Router ────────────────────────────────────────────────────────────────────
 
@@ -1464,9 +1505,14 @@ def render_tax():
                                           step=0.01, format="%.2f", key="div_wht",
                                           help="Tax already deducted at source by your broker")
             if st.button("Save Dividend", type="primary", key="save_div"):
-                portfolio().add_dividend(div_ticker, str(div_date), div_amount, div_wht)
-                st.success(f"✓ Dividend of {fmt_cur(div_amount)} recorded for {div_ticker}")
-                st.rerun()
+                errors = validate_dividend(div_amount, div_wht, div_date)
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    portfolio().add_dividend(div_ticker, str(div_date), div_amount, div_wht)
+                    st.success(f"✓ Dividend of {fmt_cur(div_amount)} (net: {fmt_cur(div_amount - div_wht)}) recorded for {div_ticker}")
+                    st.rerun()
 
     st.divider()
 
@@ -1600,8 +1646,16 @@ def render_tax():
             c5.caption("Net");     c5.write(fmt_cur(row["amount"] - row["withholding_tax"]))
             with c_del:
                 st.write("")
-                if st.button("✕", key=f"del_div_{row['id']}", help="Delete"):
-                    portfolio().delete_dividend(row["id"]); st.rerun()
+                if st.button("✕", key=f"del_div_{row['id']}", help="Delete dividend"):
+                    st.session_state[f"confirm_div_{row['id']}"] = True
+            if st.session_state.get(f"confirm_div_{row['id']}"):
+                st.warning(f"Delete this dividend record?")
+                cy, cn = st.columns(2)
+                if cy.button("Yes, delete", key=f"yes_div_{row['id']}", type="primary"):
+                    portfolio().delete_dividend(row["id"])
+                    st.session_state.pop(f"confirm_div_{row['id']}", None); st.rerun()
+                if cn.button("Cancel", key=f"no_div_{row['id']}"):
+                    st.session_state.pop(f"confirm_div_{row['id']}", None); st.rerun()
 
     # Multi-year overview
     if len(active_years) > 1:
