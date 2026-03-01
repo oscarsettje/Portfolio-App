@@ -40,22 +40,282 @@ BENCH_COLOURS = {"MSCI World":"#e8a838","S&P 500":"#b07fd4",
 
 st.markdown("""
 <style>
-  [data-testid="metric-container"]{background:#1a1a1a;border:1px solid #2a2a2a;
-      border-radius:8px;padding:14px 18px}
-  [data-testid="stMetricValue"]{font-size:1.35rem}
-  [data-testid="stMetricDelta"]{font-size:0.85rem}
-  [data-testid="stDataFrame"]{border-radius:8px;overflow:hidden}
-  [data-testid="stSidebar"]{background:#111}
-  .block-container{padding-top:1.5rem}
-  .section-title{font-size:.75rem;font-weight:600;letter-spacing:.1em;
-      text-transform:uppercase;color:#555;margin:1.5rem 0 .5rem}
-  .news-card{background:#141414;border:1px solid #222;border-radius:8px;
-      padding:12px 16px;margin-bottom:10px}
-  .news-card a{color:#5b9bd5;text-decoration:none;font-weight:500}
-  .news-card a:hover{text-decoration:underline}
-  .news-meta{font-size:.75rem;color:#555;margin-top:4px}
-  .news-ticker{display:inline-block;background:#1e2a38;color:#5b9bd5;
-      font-size:.7rem;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:6px}
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&family=Inter:wght@300;400;500;600&display=swap');
+
+  /* ── Global ── */
+  html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+    color: #d4d4d4;
+  }
+  .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1400px; }
+
+  /* ── Sidebar ── */
+  [data-testid="stSidebar"] {
+    background: #080808;
+    border-right: 1px solid #1c1c1c;
+  }
+  [data-testid="stSidebar"] .stRadio label {
+    font-family: 'Inter', sans-serif;
+    font-size: .85rem;
+    font-weight: 500;
+    color: #888;
+    padding: 6px 10px;
+    border-radius: 6px;
+    transition: color .15s, background .15s;
+    cursor: pointer;
+  }
+  [data-testid="stSidebar"] .stRadio label:hover { color: #ddd; background: #141414; }
+  [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    font-family: 'Inter', sans-serif;
+  }
+
+  /* ── Metric cards ── */
+  [data-testid="metric-container"] {
+    background: #0e0e0e;
+    border: 1px solid #1e1e1e;
+    border-radius: 10px;
+    padding: 16px 20px;
+    transition: border-color .2s;
+  }
+  [data-testid="metric-container"]:hover { border-color: #2e2e2e; }
+  [data-testid="stMetricLabel"] {
+    font-family: 'Inter', sans-serif;
+    font-size: .7rem !important;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #555 !important;
+  }
+  [data-testid="stMetricValue"] {
+    font-family: 'DM Mono', monospace !important;
+    font-size: 1.3rem !important;
+    font-weight: 500;
+    color: #e8e8e8 !important;
+    letter-spacing: -.02em;
+  }
+  [data-testid="stMetricDelta"] {
+    font-family: 'DM Mono', monospace !important;
+    font-size: .78rem !important;
+  }
+
+  /* ── Page header ── */
+  .page-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 24px;
+    background: linear-gradient(135deg, #0d0d0d 0%, #111 100%);
+    border: 1px solid #1e1e1e;
+    border-radius: 12px;
+    margin-bottom: 1.6rem;
+  }
+  .page-header-icon {
+    font-size: 1.6rem;
+    line-height: 1;
+  }
+  .page-header-text h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #f0f0f0;
+    margin: 0;
+    line-height: 1.2;
+    letter-spacing: -.02em;
+  }
+  .page-header-text p {
+    font-size: .78rem;
+    color: #555;
+    margin: 2px 0 0;
+    font-weight: 400;
+  }
+
+  /* ── Section titles ── */
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #444;
+    margin: 1.6rem 0 .7rem;
+  }
+  .section-title::before {
+    content: '';
+    display: inline-block;
+    width: 3px;
+    height: 12px;
+    background: #5b9bd5;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  /* ── DataFrames ── */
+  [data-testid="stDataFrame"] {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid #1a1a1a;
+  }
+
+  /* ── Buttons ── */
+  .stButton > button {
+    font-family: 'Inter', sans-serif;
+    font-size: .82rem;
+    font-weight: 500;
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    background: #111;
+    color: #bbb;
+    transition: all .15s;
+  }
+  .stButton > button:hover {
+    border-color: #3a3a3a;
+    background: #1a1a1a;
+    color: #eee;
+  }
+  .stButton > button[kind="primary"] {
+    background: #1a2a3a;
+    border-color: #2a4a6a;
+    color: #7ab3d9;
+  }
+  .stButton > button[kind="primary"]:hover {
+    background: #1e3348;
+    border-color: #3a6a9a;
+    color: #9ecbeb;
+  }
+
+  /* ── Inputs ── */
+  .stTextInput > div > div > input,
+  .stNumberInput > div > div > input,
+  .stSelectbox > div > div,
+  .stDateInput > div > div > input {
+    background: #0e0e0e !important;
+    border: 1px solid #2a2a2a !important;
+    border-radius: 8px !important;
+    color: #d4d4d4 !important;
+    font-family: 'Inter', sans-serif;
+    font-size: .85rem;
+  }
+  .stTextInput > div > div > input:focus,
+  .stNumberInput > div > div > input:focus {
+    border-color: #4a7aaa !important;
+    box-shadow: 0 0 0 2px rgba(91,155,213,.12) !important;
+  }
+
+  /* ── Expanders ── */
+  [data-testid="stExpander"] {
+    border: 1px solid #1e1e1e !important;
+    border-radius: 10px !important;
+    background: #0b0b0b;
+    margin-bottom: .5rem;
+  }
+  [data-testid="stExpander"] summary {
+    font-family: 'Inter', sans-serif;
+    font-size: .85rem;
+    font-weight: 500;
+    color: #888;
+    padding: 10px 14px;
+  }
+  [data-testid="stExpander"] summary:hover { color: #ccc; }
+
+  /* ── Dividers ── */
+  hr { border-color: #161616 !important; margin: 1.2rem 0 !important; }
+
+  /* ── Tabs ── */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: transparent;
+    border-bottom: 1px solid #1e1e1e;
+  }
+  .stTabs [data-baseweb="tab"] {
+    font-family: 'Inter', sans-serif;
+    font-size: .82rem;
+    font-weight: 500;
+    color: #555;
+    background: transparent;
+    border-radius: 8px 8px 0 0;
+    padding: 8px 16px;
+  }
+  .stTabs [aria-selected="true"] { color: #5b9bd5 !important; background: #0e1a26 !important; }
+
+  /* ── Alerts / info boxes ── */
+  [data-testid="stAlert"] {
+    border-radius: 8px;
+    font-family: 'Inter', sans-serif;
+    font-size: .83rem;
+  }
+
+  /* ── Captions ── */
+  [data-testid="stCaptionContainer"] p {
+    font-family: 'Inter', sans-serif;
+    font-size: .75rem;
+    color: #4a4a4a;
+  }
+
+  /* ── Spinners ── */
+  [data-testid="stSpinner"] p { font-family: 'Inter', sans-serif; font-size: .82rem; color: #555; }
+
+  /* ── News cards ── */
+  .news-card {
+    background: #0c0c0c;
+    border: 1px solid #1c1c1c;
+    border-radius: 10px;
+    padding: 13px 18px;
+    margin-bottom: 8px;
+    transition: border-color .15s;
+  }
+  .news-card:hover { border-color: #2a2a2a; }
+  .news-card a {
+    font-family: 'Inter', sans-serif;
+    color: #c8dff0;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: .88rem;
+    line-height: 1.45;
+  }
+  .news-card a:hover { color: #7ab3d9; }
+  .news-meta { font-size: .72rem; color: #444; margin-top: 5px; font-family: 'DM Mono', monospace; }
+  .news-ticker {
+    display: inline-block;
+    background: #0e1e2e;
+    color: #5b9bd5;
+    font-family: 'DM Mono', monospace;
+    font-size: .68rem;
+    font-weight: 500;
+    border-radius: 4px;
+    padding: 2px 7px;
+    margin-right: 8px;
+    border: 1px solid #1a3a5a;
+    letter-spacing: .04em;
+  }
+
+  /* ── Download buttons ── */
+  .stDownloadButton > button {
+    font-family: 'Inter', sans-serif;
+    font-size: .82rem;
+    font-weight: 500;
+    border-radius: 8px;
+    background: #0e1a0e;
+    border: 1px solid #1e3a1e;
+    color: #6abf6a;
+    transition: all .15s;
+  }
+  .stDownloadButton > button:hover {
+    background: #122012;
+    border-color: #2a5a2a;
+    color: #8ad48a;
+  }
+
+  /* ── Top-performer / laggard strip ── */
+  .perf-strip { display: flex; gap: 12px; margin: .8rem 0; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0a0a0a; }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -174,7 +434,15 @@ def _heatmap_fig(matrix: pd.DataFrame, fmt: str,
     return fig
 
 def _section(title: str):
-    st.markdown(f'<p class="section-title">{title}</p>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+
+def _page_header(icon: str, title: str, subtitle: str = ""):
+    sub = f'<p>{subtitle}</p>' if subtitle else ''
+    st.markdown(f"""
+    <div class="page-header">
+      <div class="page-header-icon">{icon}</div>
+      <div class="page-header-text"><h1>{title}</h1>{sub}</div>
+    </div>""", unsafe_allow_html=True)
 
 # ── News ──────────────────────────────────────────────────────────────────────
 def _normalise_article(raw: dict, ticker: str) -> Optional[dict]:
@@ -283,23 +551,54 @@ PAGES = ["Dashboard","Holdings","Add Transaction",
 
 def render_sidebar():
     with st.sidebar:
-        st.markdown("## 📈 Portfolio Tracker")
-        st.divider()
+        # ── Logo ──
+        st.markdown("""
+        <div style="padding:20px 4px 16px;border-bottom:1px solid #1a1a1a;margin-bottom:16px">
+          <div style="font-family:'Syne',sans-serif;font-size:1.15rem;font-weight:800;
+                      color:#e8e8e8;letter-spacing:-.02em;line-height:1">
+            Portfolio
+          </div>
+          <div style="font-family:'DM Mono',monospace;font-size:.65rem;
+                      color:#3a6a9a;letter-spacing:.18em;margin-top:3px">
+            TRACKER
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        # ── Nav ──
         page = st.radio("Nav", PAGES, label_visibility="collapsed")
-        st.divider()
+
+        # ── Portfolio value summary ──
         holdings = portfolio().all_holdings()
         prices   = get_prices()
         tv  = sum(h.current_value(prices[h.ticker]) for h in holdings if prices.get(h.ticker))
         ti  = sum(h.total_invested for h in holdings)
         pnl = tv - ti
-        st.metric("Portfolio Value", fmt_cur(tv))
-        st.metric("Unrealised P&L",  fmt_cur(pnl), delta=fmt_pct(pnl/ti*100 if ti else 0))
-        st.divider()
-        if st.button("🔄  Refresh Prices", use_container_width=True):
+        pnl_pct    = pnl / ti * 100 if ti else 0
+        pnl_colour = "#4caf7d" if pnl >= 0 else "#e05c5c"
+        arrow      = "▲" if pnl >= 0 else "▼"
+
+        st.markdown(f"""
+        <div style="margin:16px 0 8px;padding:14px 16px;background:#0b0b0b;
+                    border:1px solid #1a1a1a;border-radius:10px">
+          <div style="font-family:'Inter',sans-serif;font-size:.62rem;font-weight:700;
+                      letter-spacing:.1em;text-transform:uppercase;color:#3a3a3a;
+                      margin-bottom:6px">Portfolio Value</div>
+          <div style="font-family:'DM Mono',monospace;font-size:1.25rem;font-weight:500;
+                      color:#e8e8e8;letter-spacing:-.02em">{fmt_cur(tv)}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:.78rem;
+                      color:{pnl_colour};margin-top:4px">
+            {arrow} {fmt_cur(pnl)} &nbsp;
+            <span style="opacity:.7">({fmt_pct(pnl_pct)})</span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        if st.button("⟳  Refresh Prices", use_container_width=True):
             invalidate_prices(); st.rerun()
+
         stale = st.session_state.get("stale_prices", set())
         if stale:
-            st.warning(f"⚠️ Cached prices in use for: {', '.join(sorted(stale))}\n\nYahoo Finance may be rate-limiting. Try refreshing later.")
+            st.warning(f"Cached prices: {', '.join(sorted(stale))}")
+
     return page
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -310,7 +609,7 @@ def render_dashboard():
     dividends = portfolio().all_dividends()
 
     if not holdings:
-        st.markdown("## Dashboard")
+        _page_header("◈", "Dashboard", "Portfolio overview & key metrics")
         st.info("Your portfolio is empty. Go to **Add Transaction** to get started.")
         return
 
@@ -327,10 +626,7 @@ def render_dashboard():
     worst_h  = min(holdings, key=lambda h: h.pnl_percent(prices[h.ticker]) if prices.get(h.ticker) else 999, default=None)
 
     # ── Row 1: Headline metrics ────────────────────────────────────────────────
-    st.markdown("""
-    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:1.2rem">
-      <span style="font-size:1.6rem;font-weight:700;color:#eee">Dashboard</span>
-    </div>""", unsafe_allow_html=True)
+    _page_header("◈", "Dashboard", "Portfolio overview & key metrics")
 
     c1,c2,c3,c4,c5,c6 = st.columns(6)
     c1.metric("Portfolio Value",  fmt_cur(tv))
@@ -554,7 +850,7 @@ def render_dashboard():
 
 # ── Holdings ──────────────────────────────────────────────────────────────────
 def render_holdings():
-    st.markdown("## Holdings")
+    _page_header("▦", "Holdings", "Positions, transactions & price history")
     holdings = portfolio().all_holdings()
     prices   = get_prices()
     if not holdings:
@@ -732,7 +1028,7 @@ def _chart_price_history(ticker: str, period: str, transactions=None):
 
 # ── Add Transaction ───────────────────────────────────────────────────────────
 def render_add_transaction():
-    st.markdown("## Add Transaction")
+    _page_header("＋", "Add Transaction", "Record a buy or sell")
     existing = {h.ticker: h for h in portfolio().all_holdings()}
 
     with st.form("add_txn", clear_on_submit=True):
@@ -799,8 +1095,7 @@ def render_add_transaction():
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────
 def render_benchmark():
-    st.markdown("## Benchmark")
-    st.caption("Portfolio vs indices · rebased to €100 from your first transaction")
+    _page_header("⟁", "Benchmark", "Portfolio vs market indices")
 
     port       = portfolio()
     start_date = get_portfolio_start_date(port)
@@ -930,7 +1225,7 @@ def render_analysis():
         apply_stress, PRESET_SCENARIOS,
     )
 
-    st.markdown("## Portfolio Analysis")
+    _page_header("◎", "Portfolio Analysis", "Diversification, correlation & stress testing")
     holdings = portfolio().all_holdings()
     prices   = get_prices()
     if len(holdings) < 2:
@@ -1116,7 +1411,7 @@ def render_analysis():
 
 # ── Snapshot History ──────────────────────────────────────────────────────────
 def render_snapshot_history():
-    st.markdown("## Snapshot History")
+    _page_header("◷", "Snapshot History", "Manual portfolio value checkpoints over time")
     st.caption("Manually record your portfolio value over time to track growth.")
 
     holdings = portfolio().all_holdings()
@@ -1209,7 +1504,7 @@ def render_quant():
         build_portfolio_value_series, get_portfolio_start_date, INDICES,
     )
 
-    st.markdown("## Quant Metrics")
+    _page_header("∿", "Quant Metrics", "Sharpe, Sortino, Beta, VaR & rolling analytics")
     st.caption("Advanced portfolio statistics based on weekly returns · benchmark-relative measures use S&P 500 by default")
 
     port     = portfolio()
@@ -1511,8 +1806,7 @@ def render_tax():
     )
     from datetime import datetime as _dt
 
-    st.markdown("## Tax & Income")
-    st.caption("German Abgeltungsteuer (25% + 5.5% Soli = 26.375%) · Sparerpauschbetrag €1,000 · FIFO cost basis")
+    _page_header("⊕", "Tax & Income", "German Abgeltungsteuer · FIFO · Sparerpauschbetrag")
 
     holdings  = portfolio().holdings
     dividends = portfolio().all_dividends()
