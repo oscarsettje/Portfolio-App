@@ -69,6 +69,7 @@ if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
 if "stale_prices"    not in st.session_state: st.session_state.stale_prices    = set()
 if "bench_cache"     not in st.session_state: st.session_state.bench_cache     = {}
 if "quant_cache"     not in st.session_state: st.session_state.quant_cache     = {}
+if "portfolio_stats" not in st.session_state: st.session_state.portfolio_stats = {}
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
 def fetcher()   -> PriceFetcher: return st.session_state.fetcher
@@ -93,9 +94,36 @@ def get_prices() -> Dict[str, Optional[float]]:
 def invalidate_prices():
     fetcher().clear_cache()
     st.session_state.prices = {}
+    st.session_state.portfolio_stats = {}   # invalidate derived stats too
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_tax_summary(holdings_key: str, dividends_key: str):
+    """
+    Cache tax summaries for 5 minutes — they only change when transactions
+    or dividends change, not on every Streamlit rerun.
+    The keys are string hashes of the data so the cache invalidates correctly.
+    """
+    from tracker.tax import year_summary, all_active_years
+    holdings  = portfolio().holdings
+    dividends = portfolio().all_dividends()
+    years     = all_active_years(holdings, dividends)
+    return {y: year_summary(y, holdings, dividends) for y in years}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fmt_cur(v: float) -> str: return f"€{v:,.2f}"
+
+def _portfolio_key() -> str:
+    """A short hash of current holdings + transaction count — used as cache key."""
+    import hashlib
+    h = portfolio()
+    raw = f"{len(h.holdings)}:{sum(len(hh.transactions) for hh in h.holdings.values())}"
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
+
+def _dividends_key() -> str:
+    import hashlib
+    divs = portfolio().all_dividends()
+    raw  = f"{len(divs)}:{sum(d.amount for d in divs):.2f}"
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
 def fmt_pct(v: float) -> str: return f"{'+'if v>0 else''}{v:.2f}%"
 
 def _chart_layout(title="", height=400) -> dict:
@@ -117,12 +145,14 @@ def _colour_stat(val):
     except Exception:
         return ""
 
-def _excel_bytes(holdings, prices) -> io.BytesIO:
+def _excel_bytes(holdings, prices, dividends=None) -> io.BytesIO:
     buf = io.BytesIO()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp_path = tmp.name
     try:
-        exporter.export_to_excel(holdings, prices, filename=tmp_path)
+        exporter.export_to_excel(holdings, prices,
+                                 dividends=dividends or [],
+                                 filename=tmp_path)
         with open(tmp_path, "rb") as f:
             buf.write(f.read())
     finally:
@@ -550,7 +580,7 @@ def render_holdings():
     col_xl, col_csv, _ = st.columns([1, 1, 4])
     with col_xl:
         st.download_button("⬇  Download Excel",
-            data=_excel_bytes(holdings, prices),
+            data=_excel_bytes(holdings, prices, portfolio().all_dividends()),
             file_name=f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True)
@@ -1490,6 +1520,10 @@ def render_tax():
     if not holdings:
         st.info("Add some transactions first."); return
 
+    # Pre-compute tax summaries with caching (invalidates when data changes)
+    _p_key = _portfolio_key()
+    _d_key = _dividends_key()
+
     # ── Record a dividend ──
     with st.expander("➕  Record Dividend Payment"):
         tickers = [h.ticker for h in portfolio().all_holdings()]
@@ -1526,7 +1560,8 @@ def render_tax():
         active_years.append(current_year)
     active_years = sorted(set(active_years), reverse=True)
     sel_year = st.selectbox("Tax Year", active_years, key="tax_year")
-    summary  = year_summary(sel_year, holdings, dividends)
+    all_summaries = _cached_tax_summary(_p_key, _d_key)
+    summary = all_summaries.get(sel_year) or year_summary(sel_year, holdings, dividends)
 
     # ── Headline cards ──
     st.markdown(f"### {sel_year} Tax Summary")
@@ -1661,7 +1696,7 @@ def render_tax():
     if len(active_years) > 1:
         st.divider()
         _section("Multi-Year Overview")
-        yearly = [year_summary(y, holdings, dividends) for y in sorted(active_years)]
+        yearly = [all_summaries.get(y) or year_summary(y, holdings, dividends) for y in sorted(active_years)]
         st.dataframe(pd.DataFrame([{
             "Year":           s.year,
             "Gains":          fmt_cur(s.realised_gains),
