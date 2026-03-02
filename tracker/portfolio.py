@@ -1,5 +1,5 @@
 """
-tracker/portfolio.py  —  Portfolio class (SQLite-backed)
+tracker/portfolio.py  —  In-memory portfolio state for a single user
 """
 
 from datetime import datetime
@@ -10,18 +10,17 @@ from tracker.models import Dividend, Holding, Snapshot, Transaction
 
 
 class Portfolio:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, user_id: int, username: str):
         self._db       = db
-        self.holdings:  Dict[str, Holding] = {}
-        self.snapshots: List[Snapshot]     = []
-        self._load()
-
-    def _load(self) -> None:
-        self.holdings  = self._db.get_all_holdings()
-        self.snapshots = self._db.get_snapshots()
+        self.user_id   = user_id
+        self.username  = username
+        self.holdings: Dict[str, Holding] = {}
+        self.snapshots: List[Snapshot]    = []
+        self._reload()
 
     def _reload(self) -> None:
-        self._load()
+        self.holdings  = self._db.get_all_holdings(self.user_id)
+        self.snapshots = self._db.get_snapshots(self.user_id)
 
     # ── Transactions ──────────────────────────────────────────────────────────
 
@@ -32,18 +31,19 @@ class Portfolio:
         ticker = ticker.upper()
         if date is None:
             date = datetime.today().strftime("%Y-%m-%d")
-        self._db.upsert_holding(ticker, name, asset_type.lower(),
+        self._db.upsert_holding(self.user_id, ticker, name, asset_type.lower(),
                                 self.holdings[ticker].manual_price
                                 if ticker in self.holdings else None)
-        self._db.add_transaction(ticker, date, action, quantity, price, commission)
-        self._db.export_json_backup()
+        self._db.add_transaction(self.user_id, ticker, date, action,
+                                 quantity, price, commission)
+        self._db.export_json_backup(self.user_id, self.username)
         self._reload()
 
     def remove_holding(self, ticker: str) -> bool:
         ticker = ticker.upper()
         if ticker in self.holdings:
-            self._db.delete_holding(ticker)
-            self._db.export_json_backup()
+            self._db.delete_holding(self.user_id, ticker)
+            self._db.export_json_backup(self.user_id, self.username)
             self._reload()
             return True
         return False
@@ -51,15 +51,15 @@ class Portfolio:
     def set_manual_price(self, ticker: str, price: Optional[float]) -> None:
         ticker = ticker.upper()
         if ticker in self.holdings:
-            self._db.set_manual_price(ticker, price)
-            self._db.export_json_backup()
+            self._db.set_manual_price(self.user_id, ticker, price)
+            self._db.export_json_backup(self.user_id, self.username)
             self._reload()
 
     def replace_transactions(self, ticker: str,
                               transactions: List[Transaction]) -> None:
         ticker = ticker.upper()
-        self._db.replace_transactions(ticker, transactions)
-        self._db.export_json_backup()
+        self._db.replace_transactions(self.user_id, ticker, transactions)
+        self._db.export_json_backup(self.user_id, self.username)
         self._reload()
 
     def get_holding(self, ticker: str) -> Optional[Holding]:
@@ -76,32 +76,34 @@ class Portfolio:
         div = Dividend(ticker=ticker, date=date,
                        amount=round(amount, 2),
                        withholding_tax=round(withholding_tax, 2))
-        self._db.add_dividend(ticker, date, div.amount, div.withholding_tax)
-        self._db.export_json_backup()
+        self._db.add_dividend(self.user_id, ticker, date,
+                              div.amount, div.withholding_tax)
+        self._db.export_json_backup(self.user_id, self.username)
         return div
 
     def delete_dividend(self, div_id: int) -> None:
-        self._db.delete_dividend(div_id)
-        self._db.export_json_backup()
+        self._db.delete_dividend(self.user_id, div_id)
+        self._db.export_json_backup(self.user_id, self.username)
 
     def all_dividends(self) -> List[Dividend]:
-        return self._db.get_dividends()
+        return self._db.get_dividends(self.user_id)
 
     # ── Snapshots ─────────────────────────────────────────────────────────────
 
     def add_snapshot(self, total_value: float, total_invested: float,
                      note: str = "") -> Snapshot:
         snap = self._db.add_snapshot(
+            user_id=self.user_id,
             date=datetime.today().strftime("%Y-%m-%d"),
             total_value=round(total_value, 2),
             total_invested=round(total_invested, 2),
             note=note,
         )
-        self._db.export_json_backup()
+        self._db.export_json_backup(self.user_id, self.username)
         self._reload()
         return snap
 
     def delete_snapshot(self, index: int) -> None:
-        self._db.delete_snapshot(index)
-        self._db.export_json_backup()
+        self._db.delete_snapshot(self.user_id, index)
+        self._db.export_json_backup(self.user_id, self.username)
         self._reload()

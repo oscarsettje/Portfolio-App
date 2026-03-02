@@ -320,21 +320,100 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "db"           not in st.session_state: st.session_state.db           = Database()
-if "fetcher"      not in st.session_state: st.session_state.fetcher      = PriceFetcher(db=st.session_state.db)
-if "portfolio"    not in st.session_state: st.session_state.portfolio    = Portfolio(db=st.session_state.db)
-if "prices"       not in st.session_state: st.session_state.prices       = {}
-if "news_cache"   not in st.session_state: st.session_state.news_cache   = {}
-if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
+if "db"              not in st.session_state: st.session_state.db              = Database()
+if "fetcher"         not in st.session_state: st.session_state.fetcher         = PriceFetcher(db=st.session_state.db)
+if "user_id"         not in st.session_state: st.session_state.user_id         = None
+if "username"        not in st.session_state: st.session_state.username        = None
+if "portfolio"       not in st.session_state: st.session_state.portfolio       = None
+if "prices"          not in st.session_state: st.session_state.prices          = {}
+if "news_cache"      not in st.session_state: st.session_state.news_cache      = {}
+if "sector_cache"    not in st.session_state: st.session_state.sector_cache    = {}
 if "stale_prices"    not in st.session_state: st.session_state.stale_prices    = set()
+if "missing_prices"  not in st.session_state: st.session_state.missing_prices  = set()
 if "bench_cache"     not in st.session_state: st.session_state.bench_cache     = {}
-if "quant_cache"      not in st.session_state: st.session_state.quant_cache      = {}
-if "missing_prices"   not in st.session_state: st.session_state.missing_prices   = set()
+if "quant_cache"     not in st.session_state: st.session_state.quant_cache     = {}
 if "portfolio_stats" not in st.session_state: st.session_state.portfolio_stats = {}
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
 def fetcher()   -> PriceFetcher: return st.session_state.fetcher
 def db()        -> Database:     return st.session_state.db
+
+def _login_as(username: str) -> None:
+    """Switch the active user — resets all per-user session state."""
+    uid = db().get_or_create_user(username)
+    st.session_state.user_id   = uid
+    st.session_state.username  = username
+    st.session_state.portfolio = Portfolio(db=db(), user_id=uid, username=username)
+    # Clear all user-specific caches
+    st.session_state.prices          = {}
+    st.session_state.news_cache      = {}
+    st.session_state.sector_cache    = {}
+    st.session_state.stale_prices    = set()
+    st.session_state.missing_prices  = set()
+    st.session_state.bench_cache     = {}
+    st.session_state.quant_cache     = {}
+    st.session_state.portfolio_stats = {}
+
+def _render_login() -> bool:
+    """
+    Show login screen if no user is selected.
+    Returns True if we should proceed to the main app, False if login is needed.
+    """
+    if st.session_state.user_id is not None:
+        return True
+
+    # Centre the login card
+    _, col, _ = st.columns([1, 1.4, 1])
+    with col:
+        users = db().get_all_users()
+        usernames = [u["username"] for u in users]
+
+        st.markdown("""
+        <div style="text-align:center;padding:40px 0 24px">
+          <div style="font-family:'Syne',sans-serif;font-size:2rem;font-weight:800;
+                      color:#e8e8e8;letter-spacing:-.03em">Portfolio</div>
+          <div style="font-family:'DM Mono',monospace;font-size:.7rem;
+                      color:#3a6a9a;letter-spacing:.2em;margin-top:4px">TRACKER</div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="background:#0e0e0e;border:1px solid #1e1e1e;border-radius:14px;
+                    padding:28px 28px 24px">
+        """, unsafe_allow_html=True)
+
+        if usernames:
+            st.markdown('<p style="font-family:\'Inter\',sans-serif;font-size:.8rem;'
+                        'color:#666;margin-bottom:4px">Who\'s viewing?</p>',
+                        unsafe_allow_html=True)
+            selected = st.selectbox("Select user", usernames,
+                                    label_visibility="collapsed")
+            if st.button("Continue", type="primary", use_container_width=True):
+                _login_as(selected)
+                st.rerun()
+
+            st.markdown('<div style="text-align:center;padding:14px 0 4px;'
+                        'font-family:\'Inter\',sans-serif;font-size:.72rem;color:#333">or</div>',
+                        unsafe_allow_html=True)
+
+        new_name = st.text_input("New user name", placeholder="Enter a name to create a new account",
+                                 label_visibility="collapsed")
+        if st.button("Create & Continue", use_container_width=True,
+                     type="primary" if not usernames else "secondary"):
+            new_name = new_name.strip()
+            if not new_name:
+                st.error("Please enter a name.")
+            elif len(new_name) < 2:
+                st.error("Name must be at least 2 characters.")
+            elif len(new_name) > 30:
+                st.error("Name must be 30 characters or less.")
+            elif new_name in usernames:
+                st.error(f'"{new_name}" already exists. Select it above.')
+            else:
+                _login_as(new_name)
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+    return False
 
 # ── Prices ────────────────────────────────────────────────────────────────────
 def get_prices() -> Dict[str, Optional[float]]:
@@ -623,6 +702,22 @@ def render_sidebar():
             st.error(f"No price data for: {', '.join(sorted(missing))}\nCheck ticker symbols or set a manual price.")
         elif stale:
             st.warning(f"Cached prices: {', '.join(sorted(stale))}\nYahoo Finance may be rate-limiting.")
+
+        # ── User switcher ──
+        st.markdown("""<div style="margin-top:16px;border-top:1px solid #1a1a1a;
+                        padding-top:14px"></div>""", unsafe_allow_html=True)
+        username = st.session_state.get("username", "")
+        st.markdown(f"""
+        <div style="font-family:'DM Mono',monospace;font-size:.68rem;
+                    color:#3a3a3a;letter-spacing:.08em;margin-bottom:4px">SIGNED IN AS</div>
+        <div style="font-family:'Inter',sans-serif;font-size:.9rem;font-weight:600;
+                    color:#888;margin-bottom:8px">{username}</div>
+        """, unsafe_allow_html=True)
+        if st.button("Switch User", use_container_width=True):
+            st.session_state.user_id  = None
+            st.session_state.username = None
+            st.session_state.portfolio = None
+            st.rerun()
 
     return page
 
@@ -2005,7 +2100,7 @@ def render_tax():
     # All dividend records with delete
     st.divider()
     _section("All Dividend Records")
-    all_div_rows = db().get_dividends_with_ids()
+    all_div_rows = db().get_dividends_with_ids(st.session_state.user_id)
     if not all_div_rows:
         st.caption("No dividends recorded yet.")
     else:
@@ -2067,6 +2162,9 @@ def _render_crash(error: Exception, context: str = ""):
 
 
 def main():
+    # Show login screen if no user selected — gate everything else behind it
+    if not _render_login():
+        return
     try:
         page = render_sidebar()
     except Exception as e:
