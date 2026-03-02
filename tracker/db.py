@@ -106,7 +106,14 @@ def _tx(conn: sqlite3.Connection):
 
 class Database:
     def __init__(self):
-        self.conn = _connect()
+        try:
+            self.conn = _connect()
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not open portfolio database: {e}\n"
+                f"Make sure portfolio.db is not locked by another program "
+                f"and that you have write permission to the folder."
+            ) from e
 
     # ── Holdings ──────────────────────────────────────────────────────────────
 

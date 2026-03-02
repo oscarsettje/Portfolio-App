@@ -328,7 +328,8 @@ if "news_cache"   not in st.session_state: st.session_state.news_cache   = {}
 if "sector_cache" not in st.session_state: st.session_state.sector_cache = {}
 if "stale_prices"    not in st.session_state: st.session_state.stale_prices    = set()
 if "bench_cache"     not in st.session_state: st.session_state.bench_cache     = {}
-if "quant_cache"     not in st.session_state: st.session_state.quant_cache     = {}
+if "quant_cache"      not in st.session_state: st.session_state.quant_cache      = {}
+if "missing_prices"   not in st.session_state: st.session_state.missing_prices   = set()
 if "portfolio_stats" not in st.session_state: st.session_state.portfolio_stats = {}
 
 def portfolio() -> Portfolio:    return st.session_state.portfolio
@@ -342,10 +343,18 @@ def get_prices() -> Dict[str, Optional[float]]:
         tickers  = [h.ticker for h in holdings if not h.manual_price]
         if tickers:
             with st.spinner("Fetching live prices…"):
-                st.session_state.prices = fetcher().get_prices(tickers)
+                try:
+                    st.session_state.prices = fetcher().get_prices(tickers)
+                except Exception as e:
+                    st.warning(f"Price fetch encountered an error: {e}. Using cached prices where available.")
+                    st.session_state.prices = {t: fetcher()._cache.get(t) for t in tickers}
                 st.session_state.stale_prices = {
                     t for t in tickers if fetcher().is_stale(t)
                 }
+                # Surface tickers with no price at all (neither live nor cached)
+                missing = [t for t in tickers if not st.session_state.prices.get(t)]
+                if missing:
+                    st.session_state.missing_prices = set(missing)
         for h in holdings:
             if h.manual_price is not None:
                 st.session_state.prices[h.ticker] = h.manual_price
@@ -353,21 +362,27 @@ def get_prices() -> Dict[str, Optional[float]]:
 
 def invalidate_prices():
     fetcher().clear_cache()
-    st.session_state.prices = {}
-    st.session_state.portfolio_stats = {}   # invalidate derived stats too
+    st.session_state.prices          = {}
+    st.session_state.portfolio_stats = {}
+    st.session_state.missing_prices  = set()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_tax_summary(holdings_key: str, dividends_key: str):
     """
     Cache tax summaries for 5 minutes — they only change when transactions
     or dividends change, not on every Streamlit rerun.
-    The keys are string hashes of the data so the cache invalidates correctly.
+    Returns dict of {year: TaxSummary} or {} on error.
     """
     from tracker.tax import year_summary, all_active_years
-    holdings  = portfolio().holdings
-    dividends = portfolio().all_dividends()
-    years     = all_active_years(holdings, dividends)
-    return {y: year_summary(y, holdings, dividends) for y in years}
+    try:
+        holdings  = portfolio().holdings
+        dividends = portfolio().all_dividends()
+        years     = all_active_years(holdings, dividends)
+        return {y: year_summary(y, holdings, dividends) for y in years}
+    except Exception as e:
+        # Return empty so callers fall back to live computation with visible error
+        print(f"[Warning] Tax summary cache failed: {e}")
+        return {}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fmt_cur(v: float) -> str: return f"€{v:,.2f}"
@@ -405,7 +420,8 @@ def _colour_stat(val):
     except Exception:
         return ""
 
-def _excel_bytes(holdings, prices, dividends=None) -> io.BytesIO:
+def _excel_bytes(holdings, prices, dividends=None) -> Optional[io.BytesIO]:
+    """Returns BytesIO on success, or None and shows st.error() on failure."""
     buf = io.BytesIO()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp_path = tmp.name
@@ -415,10 +431,16 @@ def _excel_bytes(holdings, prices, dividends=None) -> io.BytesIO:
                                  filename=tmp_path)
         with open(tmp_path, "rb") as f:
             buf.write(f.read())
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        st.error(f"Export failed: {e}. Try again or check that openpyxl is installed.")
+        return None
     finally:
-        os.unlink(tmp_path)
-    buf.seek(0)
-    return buf
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 def _heatmap_fig(matrix: pd.DataFrame, fmt: str,
                  zmin=None, zmax=None, zmid=None, height=350) -> go.Figure:
@@ -595,9 +617,12 @@ def render_sidebar():
         if st.button("⟳  Refresh Prices", use_container_width=True):
             invalidate_prices(); st.rerun()
 
-        stale = st.session_state.get("stale_prices", set())
-        if stale:
-            st.warning(f"Cached prices: {', '.join(sorted(stale))}")
+        stale   = st.session_state.get("stale_prices", set())
+        missing = st.session_state.get("missing_prices", set())
+        if missing:
+            st.error(f"No price data for: {', '.join(sorted(missing))}\nCheck ticker symbols or set a manual price.")
+        elif stale:
+            st.warning(f"Cached prices: {', '.join(sorted(stale))}\nYahoo Finance may be rate-limiting.")
 
     return page
 
@@ -875,11 +900,13 @@ def render_holdings():
     _section("Export")
     col_xl, col_csv, _ = st.columns([1, 1, 4])
     with col_xl:
-        st.download_button("⬇  Download Excel",
-            data=_excel_bytes(holdings, prices, portfolio().all_dividends()),
-            file_name=f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True)
+        _xlsx = _excel_bytes(holdings, prices, portfolio().all_dividends())
+        if _xlsx:
+            st.download_button("⬇  Download Excel",
+                data=_xlsx,
+                file_name=f"portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
     with col_csv:
         csv_rows = [{"ticker":h.ticker,"name":h.name,"type":h.asset_type,
                      "quantity":round(h.quantity,6),"avg_cost":round(h.average_cost,4),
@@ -964,9 +991,12 @@ def render_holdings():
                         for e in errors:
                             st.error(e)
                     else:
-                        portfolio().replace_transactions(h.ticker, new_txns)
-                        invalidate_prices()
-                        st.success("✓ Saved"); st.rerun()
+                        try:
+                            portfolio().replace_transactions(h.ticker, new_txns)
+                            invalidate_prices()
+                            st.success("✓ Saved"); st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to save changes: {e}")
 
             col_del, col_conf, _ = st.columns([1, 1.5, 2.5])
             with col_del:
@@ -991,10 +1021,17 @@ def render_holdings():
 def _chart_price_history(ticker: str, period: str, transactions=None):
     try:
         hist = yf.Ticker(ticker).history(period=period)
-    except Exception:
-        st.caption("Could not load price history."); return
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate" in msg or "429" in msg or "too many" in msg:
+            st.caption("⚠ Price history unavailable — Yahoo Finance rate limit. Try again in a few minutes.")
+        else:
+            st.caption(f"⚠ Could not load price history for {ticker}: {e}")
+        return
     if hist.empty:
-        st.caption("No historical data available."); return
+        st.caption(f"No historical price data available for {ticker}. "
+                   f"The ticker may be invalid or unsupported by Yahoo Finance.")
+        return
 
     # Handle MultiIndex from newer yfinance
     if isinstance(hist.columns, pd.MultiIndex):
@@ -1069,17 +1106,20 @@ def render_add_transaction():
                 for e in errors:
                     st.error(e)
             else:
-                portfolio().add_transaction(
-                    ticker=ticker,
-                    name=h.name if h else name,
-                    asset_type=h.asset_type if h else asset_type,
-                    action=action.lower(), quantity=quantity,
-                    price=price, date=str(txn_date), commission=commission,
-                )
-                invalidate_prices()
-                st.session_state.news_cache = {}
-                st.success(f"✓ {action} {quantity:,.4f} × {ticker} @ {fmt_cur(price)} recorded.")
-                st.rerun()
+                try:
+                    portfolio().add_transaction(
+                        ticker=ticker,
+                        name=h.name if h else name,
+                        asset_type=h.asset_type if h else asset_type,
+                        action=action.lower(), quantity=quantity,
+                        price=price, date=str(txn_date), commission=commission,
+                    )
+                    invalidate_prices()
+                    st.session_state.news_cache = {}
+                    st.success(f"✓ {action} {quantity:,.4f} × {ticker} @ {fmt_cur(price)} recorded.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save transaction: {e}")
 
     with st.expander("📖  Ticker format guide"):
         st.markdown("""
@@ -1431,9 +1471,12 @@ def render_snapshot_history():
             if tv == 0:
                 st.warning("Portfolio value is €0 — check prices are loaded.")
             else:
-                snap = portfolio().add_snapshot(tv, ti, note)
-                st.success(f"✓ Saved {fmt_cur(snap.total_value)} on {snap.date}")
-                st.rerun()
+                try:
+                    snap = portfolio().add_snapshot(tv, ti, note)
+                    st.success(f"✓ Saved {fmt_cur(snap.total_value)} on {snap.date}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save snapshot: {e}")
 
     st.divider()
     snaps = portfolio().snapshots
@@ -2002,18 +2045,46 @@ def render_tax():
         } for s in yearly]), use_container_width=True, hide_index=True)
 
 
+def _render_crash(error: Exception, context: str = ""):
+    """Friendly full-page error for unrecoverable crashes."""
+    import traceback
+    tb = traceback.format_exc()
+    st.markdown(f"""
+    <div style="background:#1a0a0a;border:1px solid #4a1a1a;border-radius:12px;
+                padding:28px 32px;margin:2rem 0">
+      <div style="font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700;
+                  color:#e05c5c;margin-bottom:8px">Something went wrong</div>
+      <div style="font-family:'Inter',sans-serif;font-size:.85rem;color:#888;
+                  margin-bottom:16px">{context or "An unexpected error occurred."}</div>
+      <details>
+        <summary style="font-family:'DM Mono',monospace;font-size:.75rem;
+                        color:#555;cursor:pointer">Show technical details</summary>
+        <pre style="font-family:'DM Mono',monospace;font-size:.72rem;color:#666;
+                    margin-top:10px;white-space:pre-wrap;word-break:break-all">{tb}</pre>
+      </details>
+    </div>""", unsafe_allow_html=True)
+    st.info("Try **refreshing the page**. If the problem persists, check that `portfolio.db` is not open in another program.")
+
+
 def main():
-    page = render_sidebar()
-    {
-        "Dashboard":          render_dashboard,
-        "Holdings":           render_holdings,
-        "Add Transaction":    render_add_transaction,
-        "Benchmark":          render_benchmark,
-        "Portfolio Analysis": render_analysis,
-        "Snapshot History":   render_snapshot_history,
-        "Quant Metrics":      render_quant,
-        "Tax & Income":       render_tax,
-    }.get(page, render_dashboard)()
+    try:
+        page = render_sidebar()
+    except Exception as e:
+        st.error(f"Sidebar failed to load: {e}")
+        return
+    try:
+        {
+            "Dashboard":          render_dashboard,
+            "Holdings":           render_holdings,
+            "Add Transaction":    render_add_transaction,
+            "Benchmark":          render_benchmark,
+            "Portfolio Analysis": render_analysis,
+            "Snapshot History":   render_snapshot_history,
+            "Quant Metrics":      render_quant,
+            "Tax & Income":       render_tax,
+        }.get(page, render_dashboard)()
+    except Exception as e:
+        _render_crash(e, f"Error on page '{page}': {e}")
 
 if __name__ == "__main__":
     main()
