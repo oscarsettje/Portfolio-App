@@ -1,18 +1,17 @@
 """
 tracker/db.py  —  SQLite database layer
 
-Schema
-──────
-  users        : user accounts (id, username, created_at)
+Schema (multi-user, v2)
+────────────────────────
+  users        : user accounts
   holdings     : one row per (user_id, ticker)
-  transactions : one row per buy/sell, FK → holdings
-  dividends    : dividend payments per (user_id, ticker)
-  snapshots    : manual portfolio value snapshots per user
-  price_cache  : last known price per ticker (shared across users)
+  transactions : buy/sell per user
+  dividends    : dividend payments per user
+  snapshots    : manual value checkpoints per user
+  price_cache  : last known price per ticker (shared across all users)
 """
 
 import json
-import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -21,137 +20,206 @@ from typing import Dict, List, Optional
 
 from tracker.models import Dividend, Holding, Snapshot, Transaction
 
-DB_FILE            = "portfolio.db"
-JSON_DATA_FILE     = "portfolio_data.json"
-JSON_SNAPSHOT_FILE = "portfolio_snapshots.json"
+DB_FILE       = "portfolio.db"
+DEFAULT_USER  = "Default"
 
-DEFAULT_USER = "Default"   # existing data gets migrated to this user
 
-_SCHEMA = """
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+# ── Schema helpers ─────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    username   TEXT    NOT NULL UNIQUE,
-    created_at TEXT    NOT NULL
-);
+def _has_col(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    return any(r[1] == col
+               for r in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
-CREATE TABLE IF NOT EXISTS holdings (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    ticker       TEXT    NOT NULL,
-    name         TEXT    NOT NULL,
-    asset_type   TEXT    NOT NULL,
-    manual_price REAL,
-    UNIQUE(user_id, ticker)
-);
+def _has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone())
 
-CREATE TABLE IF NOT EXISTS transactions (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    ticker     TEXT    NOT NULL,
-    date       TEXT    NOT NULL,
-    action     TEXT    NOT NULL CHECK(action IN ('buy','sell')),
-    quantity   REAL    NOT NULL CHECK(quantity > 0),
-    price      REAL    NOT NULL CHECK(price > 0),
-    commission REAL    NOT NULL DEFAULT 0.0
-);
 
-CREATE INDEX IF NOT EXISTS idx_transactions_user   ON transactions(user_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_ticker ON transactions(user_id, ticker);
-CREATE INDEX IF NOT EXISTS idx_transactions_date   ON transactions(date);
+# ── Migration ──────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS dividends (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    ticker          TEXT    NOT NULL,
-    date            TEXT    NOT NULL,
-    amount          REAL    NOT NULL CHECK(amount > 0),
-    withholding_tax REAL    NOT NULL DEFAULT 0.0
-);
+def _migrate(conn: sqlite3.Connection) -> int:
+    """
+    Idempotent migration from single-user to multi-user schema.
+    Returns the user_id of the DEFAULT_USER (always 1 on a fresh or migrated DB).
+    Safe to call on every startup — each step checks whether it is needed first.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=OFF")
 
-CREATE INDEX IF NOT EXISTS idx_dividends_user   ON dividends(user_id);
-CREATE INDEX IF NOT EXISTS idx_dividends_ticker ON dividends(user_id, ticker);
-CREATE INDEX IF NOT EXISTS idx_dividends_date   ON dividends(date);
+    # ── users & price_cache (always safe to create if not exist) ──────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   TEXT    NOT NULL UNIQUE,
+            created_at TEXT    NOT NULL
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS price_cache (
+            ticker     TEXT PRIMARY KEY,
+            price      REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
 
-CREATE TABLE IF NOT EXISTS snapshots (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    date            TEXT    NOT NULL,
-    total_value     REAL    NOT NULL,
-    total_invested  REAL    NOT NULL,
-    note            TEXT    DEFAULT ''
-);
+    # Ensure default user exists early so we can use its real id in INSERTs
+    conn.execute("INSERT OR IGNORE INTO users (username, created_at) VALUES (?, ?)",
+                 (DEFAULT_USER, datetime.now().isoformat()))
+    conn.commit()
+    default_uid = conn.execute(
+        "SELECT id FROM users WHERE username=?", (DEFAULT_USER,)
+    ).fetchone()[0]
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_user ON snapshots(user_id);
+    # ── holdings ───────────────────────────────────────────────────────────────
+    if _has_table(conn, "holdings") and not _has_col(conn, "holdings", "user_id"):
+        # Old schema: ticker TEXT PRIMARY KEY — rebuild with user_id
+        conn.executescript(f"""
+            ALTER TABLE holdings RENAME TO _holdings_old;
+            CREATE TABLE holdings (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id      INTEGER NOT NULL DEFAULT {default_uid},
+                ticker       TEXT    NOT NULL,
+                name         TEXT    NOT NULL,
+                asset_type   TEXT    NOT NULL,
+                manual_price REAL,
+                UNIQUE(user_id, ticker)
+            );
+            INSERT INTO holdings (user_id, ticker, name, asset_type, manual_price)
+                SELECT {default_uid}, ticker, name, asset_type, manual_price
+                FROM _holdings_old;
+            DROP TABLE _holdings_old;
+        """)
+        conn.commit()
+    elif not _has_table(conn, "holdings"):
+        conn.execute(f"""
+            CREATE TABLE holdings (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id      INTEGER NOT NULL DEFAULT {default_uid},
+                ticker       TEXT    NOT NULL,
+                name         TEXT    NOT NULL,
+                asset_type   TEXT    NOT NULL,
+                manual_price REAL,
+                UNIQUE(user_id, ticker)
+            )""")
 
-CREATE TABLE IF NOT EXISTS price_cache (
-    ticker     TEXT PRIMARY KEY,
-    price      REAL NOT NULL,
-    updated_at TEXT NOT NULL
-);
-"""
+    # ── transactions ───────────────────────────────────────────────────────────
+    if _has_table(conn, "transactions") and not _has_col(conn, "transactions", "user_id"):
+        # Add commission if this is a very old DB (pre-v1 migration)
+        if not _has_col(conn, "transactions", "commission"):
+            conn.execute(
+                "ALTER TABLE transactions ADD COLUMN commission REAL NOT NULL DEFAULT 0.0")
+            conn.commit()
+        conn.executescript(f"""
+            ALTER TABLE transactions RENAME TO _transactions_old;
+            CREATE TABLE transactions (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL DEFAULT {default_uid},
+                ticker     TEXT    NOT NULL,
+                date       TEXT    NOT NULL,
+                action     TEXT    NOT NULL CHECK(action IN ('buy','sell')),
+                quantity   REAL    NOT NULL CHECK(quantity > 0),
+                price      REAL    NOT NULL CHECK(price > 0),
+                commission REAL    NOT NULL DEFAULT 0.0
+            );
+            INSERT INTO transactions
+                    (user_id, ticker, date, action, quantity, price, commission)
+                SELECT {default_uid}, ticker, date, action, quantity, price,
+                       COALESCE(commission, 0.0)
+                FROM _transactions_old;
+            DROP TABLE _transactions_old;
+        """)
+        conn.commit()
+    elif not _has_table(conn, "transactions"):
+        conn.execute(f"""
+            CREATE TABLE transactions (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL DEFAULT {default_uid},
+                ticker     TEXT    NOT NULL,
+                date       TEXT    NOT NULL,
+                action     TEXT    NOT NULL CHECK(action IN ('buy','sell')),
+                quantity   REAL    NOT NULL CHECK(quantity > 0),
+                price      REAL    NOT NULL CHECK(price > 0),
+                commission REAL    NOT NULL DEFAULT 0.0
+            )""")
 
-# Migrations applied safely on every startup
-_MIGRATIONS = [
-    # v1: add commission to old single-user schema
-    "ALTER TABLE transactions ADD COLUMN commission REAL NOT NULL DEFAULT 0.0",
-    # v2: add users table (no-op if already exists — handled by IF NOT EXISTS in schema)
-    # v3: add user_id to holdings (for migration from single-user schema)
-    "ALTER TABLE holdings ADD COLUMN user_id INTEGER",
-    # v4: add user_id to transactions
-    "ALTER TABLE transactions ADD COLUMN user_id INTEGER",
-    # v5: add user_id to dividends
-    "ALTER TABLE dividends ADD COLUMN user_id INTEGER",
-    # v6: add user_id to snapshots
-    "ALTER TABLE snapshots ADD COLUMN user_id INTEGER",
-]
+    # ── dividends ──────────────────────────────────────────────────────────────
+    if _has_table(conn, "dividends") and not _has_col(conn, "dividends", "user_id"):
+        conn.executescript(f"""
+            ALTER TABLE dividends RENAME TO _dividends_old;
+            CREATE TABLE dividends (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL DEFAULT {default_uid},
+                ticker          TEXT    NOT NULL,
+                date            TEXT    NOT NULL,
+                amount          REAL    NOT NULL CHECK(amount > 0),
+                withholding_tax REAL    NOT NULL DEFAULT 0.0
+            );
+            INSERT INTO dividends
+                    (user_id, ticker, date, amount, withholding_tax)
+                SELECT {default_uid}, ticker, date, amount,
+                       COALESCE(withholding_tax, 0.0)
+                FROM _dividends_old;
+            DROP TABLE _dividends_old;
+        """)
+        conn.commit()
+    elif not _has_table(conn, "dividends"):
+        conn.execute(f"""
+            CREATE TABLE dividends (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL DEFAULT {default_uid},
+                ticker          TEXT    NOT NULL,
+                date            TEXT    NOT NULL,
+                amount          REAL    NOT NULL CHECK(amount > 0),
+                withholding_tax REAL    NOT NULL DEFAULT 0.0
+            )""")
+
+    # ── snapshots ──────────────────────────────────────────────────────────────
+    if _has_table(conn, "snapshots") and not _has_col(conn, "snapshots", "user_id"):
+        conn.executescript(f"""
+            ALTER TABLE snapshots RENAME TO _snapshots_old;
+            CREATE TABLE snapshots (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id        INTEGER NOT NULL DEFAULT {default_uid},
+                date           TEXT    NOT NULL,
+                total_value    REAL    NOT NULL,
+                total_invested REAL    NOT NULL,
+                note           TEXT    DEFAULT ''
+            );
+            INSERT INTO snapshots
+                    (user_id, date, total_value, total_invested, note)
+                SELECT {default_uid}, date, total_value, total_invested,
+                       COALESCE(note, '')
+                FROM _snapshots_old;
+            DROP TABLE _snapshots_old;
+        """)
+        conn.commit()
+    elif not _has_table(conn, "snapshots"):
+        conn.execute(f"""
+            CREATE TABLE snapshots (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id        INTEGER NOT NULL DEFAULT {default_uid},
+                date           TEXT    NOT NULL,
+                total_value    REAL    NOT NULL,
+                total_invested REAL    NOT NULL,
+                note           TEXT    DEFAULT ''
+            )""")
+
+    # ── indexes ────────────────────────────────────────────────────────────────
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_txn_user   ON transactions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_txn_ticker ON transactions(user_id, ticker);
+        CREATE INDEX IF NOT EXISTS idx_div_user   ON dividends(user_id);
+        CREATE INDEX IF NOT EXISTS idx_snap_user  ON snapshots(user_id);
+    """)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+    return default_uid
 
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    for migration in _MIGRATIONS:
-        try:
-            conn.execute(migration)
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists or table doesn't exist yet
+    _migrate(conn)
     return conn
-
-
-def _migrate_to_multiuser(conn: sqlite3.Connection) -> None:
-    """
-    One-time migration: assign all existing data to the DEFAULT_USER.
-    Runs only if there are rows with user_id = NULL.
-    Safe to call repeatedly — does nothing after the first run.
-    """
-    needs_migration = conn.execute(
-        "SELECT 1 FROM holdings WHERE user_id IS NULL LIMIT 1"
-    ).fetchone()
-    if not needs_migration:
-        return
-
-    # Ensure default user exists
-    conn.execute("""
-        INSERT OR IGNORE INTO users (username, created_at)
-        VALUES (?, ?)
-    """, (DEFAULT_USER, datetime.now().isoformat()))
-    conn.commit()
-
-    uid = conn.execute(
-        "SELECT id FROM users WHERE username = ?", (DEFAULT_USER,)
-    ).fetchone()["id"]
-
-    # Assign all NULL user_ids to the default user
-    for table in ("holdings", "transactions", "dividends", "snapshots"):
-        try:
-            conn.execute(f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL", (uid,))
-        except Exception:
-            pass
-    conn.commit()
 
 
 @contextmanager
@@ -164,11 +232,12 @@ def _tx(conn: sqlite3.Connection):
         raise
 
 
+# ── Database class ─────────────────────────────────────────────────────────────
+
 class Database:
     def __init__(self):
         try:
             self.conn = _connect()
-            _migrate_to_multiuser(self.conn)
         except Exception as e:
             raise RuntimeError(
                 f"Could not open portfolio database: {e}\n"
@@ -176,7 +245,7 @@ class Database:
                 f"and that you have write permission to the folder."
             ) from e
 
-    # ── User management ───────────────────────────────────────────────────────
+    # ── Users ─────────────────────────────────────────────────────────────────
 
     def get_all_users(self) -> List[dict]:
         rows = self.conn.execute(
@@ -186,7 +255,7 @@ class Database:
 
     def get_user_id(self, username: str) -> Optional[int]:
         row = self.conn.execute(
-            "SELECT id FROM users WHERE username = ?", (username,)
+            "SELECT id FROM users WHERE username=?", (username,)
         ).fetchone()
         return row["id"] if row else None
 
@@ -200,33 +269,29 @@ class Database:
 
     def get_or_create_user(self, username: str) -> int:
         uid = self.get_user_id(username)
-        if uid is None:
-            uid = self.create_user(username)
-        return uid
+        return uid if uid is not None else self.create_user(username)
 
     def delete_user(self, user_id: int) -> None:
-        """Delete a user and all their data (CASCADE handles related rows)."""
         with _tx(self.conn):
-            self.conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
 
     def rename_user(self, user_id: int, new_username: str) -> None:
         with _tx(self.conn):
             self.conn.execute(
-                "UPDATE users SET username = ? WHERE id = ?",
-                (new_username, user_id)
+                "UPDATE users SET username=? WHERE id=?", (new_username, user_id)
             )
 
     # ── Holdings ──────────────────────────────────────────────────────────────
 
     def get_all_holdings(self, user_id: int) -> Dict[str, Holding]:
         rows = self.conn.execute(
-            "SELECT * FROM holdings WHERE user_id = ?", (user_id,)
+            "SELECT * FROM holdings WHERE user_id=?", (user_id,)
         ).fetchall()
         holdings = {}
         for row in rows:
             ticker = row["ticker"]
             txn_rows = self.conn.execute(
-                "SELECT * FROM transactions WHERE user_id = ? AND ticker = ? ORDER BY date, id",
+                "SELECT * FROM transactions WHERE user_id=? AND ticker=? ORDER BY date, id",
                 (user_id, ticker)
             ).fetchall()
             transactions = [
@@ -249,22 +314,28 @@ class Database:
                 INSERT INTO holdings (user_id, ticker, name, asset_type, manual_price)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, ticker) DO UPDATE SET
-                    name         = excluded.name,
-                    asset_type   = excluded.asset_type,
-                    manual_price = excluded.manual_price
+                    name=excluded.name,
+                    asset_type=excluded.asset_type,
+                    manual_price=excluded.manual_price
             """, (user_id, ticker, name, asset_type, manual_price))
 
     def set_manual_price(self, user_id: int, ticker: str,
                          price: Optional[float]) -> None:
         with _tx(self.conn):
             self.conn.execute(
-                "UPDATE holdings SET manual_price = ? WHERE user_id = ? AND ticker = ?",
+                "UPDATE holdings SET manual_price=? WHERE user_id=? AND ticker=?",
                 (price, user_id, ticker))
 
     def delete_holding(self, user_id: int, ticker: str) -> None:
         with _tx(self.conn):
             self.conn.execute(
-                "DELETE FROM holdings WHERE user_id = ? AND ticker = ?",
+                "DELETE FROM holdings WHERE user_id=? AND ticker=?",
+                (user_id, ticker))
+            self.conn.execute(
+                "DELETE FROM transactions WHERE user_id=? AND ticker=?",
+                (user_id, ticker))
+            self.conn.execute(
+                "DELETE FROM dividends WHERE user_id=? AND ticker=?",
                 (user_id, ticker))
 
     # ── Transactions ──────────────────────────────────────────────────────────
@@ -274,7 +345,8 @@ class Database:
                         commission: float = 0.0) -> int:
         with _tx(self.conn):
             cur = self.conn.execute("""
-                INSERT INTO transactions (user_id, ticker, date, action, quantity, price, commission)
+                INSERT INTO transactions
+                    (user_id, ticker, date, action, quantity, price, commission)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (user_id, ticker, date, action, quantity, price, commission))
         return cur.lastrowid
@@ -283,12 +355,14 @@ class Database:
                               transactions: List[Transaction]) -> None:
         with _tx(self.conn):
             self.conn.execute(
-                "DELETE FROM transactions WHERE user_id = ? AND ticker = ?",
+                "DELETE FROM transactions WHERE user_id=? AND ticker=?",
                 (user_id, ticker))
             self.conn.executemany("""
-                INSERT INTO transactions (user_id, ticker, date, action, quantity, price, commission)
+                INSERT INTO transactions
+                    (user_id, ticker, date, action, quantity, price, commission)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, [(user_id, ticker, t.date, t.action, t.quantity, t.price, t.commission)
+            """, [(user_id, ticker, t.date, t.action,
+                   t.quantity, t.price, t.commission)
                   for t in transactions])
 
     # ── Dividends ─────────────────────────────────────────────────────────────
@@ -306,12 +380,12 @@ class Database:
                       ticker: Optional[str] = None) -> List[Dividend]:
         if ticker:
             rows = self.conn.execute(
-                "SELECT * FROM dividends WHERE user_id = ? AND ticker = ? ORDER BY date, id",
+                "SELECT * FROM dividends WHERE user_id=? AND ticker=? ORDER BY date, id",
                 (user_id, ticker)
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM dividends WHERE user_id = ? ORDER BY date, id",
+                "SELECT * FROM dividends WHERE user_id=? ORDER BY date, id",
                 (user_id,)
             ).fetchall()
         return [Dividend(ticker=r["ticker"], date=r["date"],
@@ -321,12 +395,12 @@ class Database:
     def delete_dividend(self, user_id: int, div_id: int) -> None:
         with _tx(self.conn):
             self.conn.execute(
-                "DELETE FROM dividends WHERE id = ? AND user_id = ?",
+                "DELETE FROM dividends WHERE id=? AND user_id=?",
                 (div_id, user_id))
 
     def get_dividends_with_ids(self, user_id: int) -> List[dict]:
         rows = self.conn.execute(
-            "SELECT * FROM dividends WHERE user_id = ? ORDER BY date DESC, id DESC",
+            "SELECT * FROM dividends WHERE user_id=? ORDER BY date DESC, id DESC",
             (user_id,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -335,7 +409,7 @@ class Database:
 
     def get_snapshots(self, user_id: int) -> List[Snapshot]:
         rows = self.conn.execute(
-            "SELECT * FROM snapshots WHERE user_id = ? ORDER BY date, id",
+            "SELECT * FROM snapshots WHERE user_id=? ORDER BY date, id",
             (user_id,)
         ).fetchall()
         return [Snapshot(date=r["date"], total_value=r["total_value"],
@@ -354,15 +428,15 @@ class Database:
 
     def delete_snapshot(self, user_id: int, index: int) -> None:
         rows = self.conn.execute(
-            "SELECT id FROM snapshots WHERE user_id = ? ORDER BY date, id",
+            "SELECT id FROM snapshots WHERE user_id=? ORDER BY date, id",
             (user_id,)
         ).fetchall()
         if 0 <= index < len(rows):
             with _tx(self.conn):
-                self.conn.execute("DELETE FROM snapshots WHERE id = ?",
+                self.conn.execute("DELETE FROM snapshots WHERE id=?",
                                   (rows[index]["id"],))
 
-    # ── Price cache (shared across users) ─────────────────────────────────────
+    # ── Price cache (shared across all users) ─────────────────────────────────
 
     def get_price_cache(self) -> Dict[str, float]:
         rows = self.conn.execute("SELECT ticker, price FROM price_cache").fetchall()
@@ -373,7 +447,7 @@ class Database:
             self.conn.execute("""
                 INSERT INTO price_cache (ticker, price, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(ticker) DO UPDATE SET
-                    price = excluded.price, updated_at = excluded.updated_at
+                    price=excluded.price, updated_at=excluded.updated_at
             """, (ticker, price, datetime.now().isoformat()))
 
     def set_prices(self, prices: Dict[str, float]) -> None:
@@ -382,30 +456,27 @@ class Database:
             self.conn.executemany("""
                 INSERT INTO price_cache (ticker, price, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(ticker) DO UPDATE SET
-                    price = excluded.price, updated_at = excluded.updated_at
+                    price=excluded.price, updated_at=excluded.updated_at
             """, [(t, p, now) for t, p in prices.items()])
 
     def get_price_updated_at(self, ticker: str) -> Optional[str]:
         row = self.conn.execute(
-            "SELECT updated_at FROM price_cache WHERE ticker = ?", (ticker,)
+            "SELECT updated_at FROM price_cache WHERE ticker=?", (ticker,)
         ).fetchone()
         return row["updated_at"] if row else None
 
     # ── JSON backup ───────────────────────────────────────────────────────────
 
     def export_json_backup(self, user_id: int, username: str) -> None:
-        """Write per-user JSON backup files."""
-        safe_name = username.replace(" ", "_").lower()
-        data_file = f"portfolio_data_{safe_name}.json"
-        snap_file = f"portfolio_snapshots_{safe_name}.json"
+        safe = username.replace(" ", "_").lower()
         try:
             holdings = self.get_all_holdings(user_id)
-            with open(data_file, "w") as f:
+            with open(f"portfolio_data_{safe}.json", "w") as f:
                 json.dump({t: asdict(h) for t, h in holdings.items()}, f, indent=2)
         except Exception as e:
             print(f"[Warning] JSON backup failed for {username}: {e}")
         try:
-            with open(snap_file, "w") as f:
+            with open(f"portfolio_snapshots_{safe}.json", "w") as f:
                 json.dump([asdict(s) for s in self.get_snapshots(user_id)], f, indent=2)
         except Exception as e:
             print(f"[Warning] Snapshot backup failed for {username}: {e}")
@@ -414,12 +485,12 @@ class Database:
 
     def transaction_count(self, user_id: int) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) FROM transactions WHERE user_id = ?", (user_id,)
+            "SELECT COUNT(*) FROM transactions WHERE user_id=?", (user_id,)
         ).fetchone()[0]
 
     def holding_count(self, user_id: int) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) FROM holdings WHERE user_id = ?", (user_id,)
+            "SELECT COUNT(*) FROM holdings WHERE user_id=?", (user_id,)
         ).fetchone()[0]
 
     def close(self) -> None:
