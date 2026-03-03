@@ -648,7 +648,7 @@ def _render_news(tickers: List[str]):
 </div>""", unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-PAGES = ["Dashboard","Holdings","Add Transaction","Import",
+PAGES = ["Dashboard","Holdings","Add Transaction",
          "Benchmark","Portfolio Analysis","Quant Metrics","Tax & Income","Snapshot History"]
 
 def render_sidebar():
@@ -1161,64 +1161,62 @@ def _chart_price_history(ticker: str, period: str, transactions=None):
 
 # ── Add Transaction ───────────────────────────────────────────────────────────
 def render_add_transaction():
-    _page_header("＋", "Add Transaction", "Record a buy or sell")
-    existing = {h.ticker: h for h in portfolio().all_holdings()}
+    _page_header("＋", "Add Transaction", "Record a buy or sell · or import from Portfolio Performance")
 
-    with st.form("add_txn", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            action = st.selectbox("Action", ["BUY","SELL"])
-            ticker = st.text_input("Ticker", placeholder="e.g. AAPL, BTC-USD, SIE.DE").upper()
-            if ticker in existing:
-                st.info(f"Adding to existing holding: {existing[ticker].name}")
-                name, asset_type = existing[ticker].name, existing[ticker].asset_type
-            else:
-                name       = st.text_input("Name", placeholder="e.g. Apple Inc.")
-                asset_type = st.selectbox("Asset Type", ["stock","crypto","etf"])
-        with col2:
-            quantity   = st.number_input("Quantity",           min_value=0.0001, step=0.0001, format="%.4f")
-            price      = st.number_input("Price per unit (€)", min_value=0.0001, step=0.01,   format="%.4f")
-            commission = st.number_input("Broker commission (€)", min_value=0.0, step=0.01, format="%.2f",
-                                         help="Fixed fee charged by your broker for this trade")
-            txn_date   = st.date_input("Date", value=date.today())
+    tab_manual, tab_import = st.tabs(["Manual Entry", "Import from Portfolio Performance"])
 
-        if st.form_submit_button("Add Transaction", use_container_width=True, type="primary"):
-            h = existing.get(ticker)
-            # Collect all validation errors before showing any
-            errors = []
-            errors += validate_ticker(ticker)
-            if not errors:  # only validate name if ticker is ok
-                if ticker not in existing:
-                    errors += validate_name(name)
-                errors += validate_transaction(
-                    action=action.lower(),
-                    quantity=quantity,
-                    price=price,
-                    txn_date=txn_date,
-                    commission=commission,
-                    holding=h,
-                )
-            if errors:
-                for e in errors:
-                    st.error(e)
-            else:
-                try:
-                    portfolio().add_transaction(
-                        ticker=ticker,
-                        name=h.name if h else name,
-                        asset_type=h.asset_type if h else asset_type,
-                        action=action.lower(), quantity=quantity,
-                        price=price, date=str(txn_date), commission=commission,
+    # ── Tab 1: Manual entry ───────────────────────────────────────────────────
+    with tab_manual:
+        existing = {h.ticker: h for h in portfolio().all_holdings()}
+
+        with st.form("add_txn", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                action = st.selectbox("Action", ["BUY","SELL"])
+                ticker = st.text_input("Ticker", placeholder="e.g. AAPL, BTC-USD, SIE.DE").upper()
+                if ticker in existing:
+                    st.info(f"Adding to existing holding: {existing[ticker].name}")
+                    name, asset_type = existing[ticker].name, existing[ticker].asset_type
+                else:
+                    name       = st.text_input("Name", placeholder="e.g. Apple Inc.")
+                    asset_type = st.selectbox("Asset Type", ["stock","crypto","etf"])
+            with col2:
+                quantity   = st.number_input("Quantity",           min_value=0.0001, step=0.0001, format="%.4f")
+                price      = st.number_input("Price per unit (€)", min_value=0.0001, step=0.01,   format="%.4f")
+                commission = st.number_input("Broker commission (€)", min_value=0.0, step=0.01, format="%.2f",
+                                             help="Fixed fee charged by your broker for this trade")
+                txn_date   = st.date_input("Date", value=date.today())
+
+            if st.form_submit_button("Add Transaction", use_container_width=True, type="primary"):
+                h = existing.get(ticker)
+                errors = []
+                errors += validate_ticker(ticker)
+                if not errors:
+                    if ticker not in existing:
+                        errors += validate_name(name)
+                    errors += validate_transaction(
+                        action=action.lower(), quantity=quantity, price=price,
+                        txn_date=txn_date, commission=commission, holding=h,
                     )
-                    invalidate_prices()
-                    st.session_state.news_cache = {}
-                    st.success(f"✓ {action} {quantity:,.4f} × {ticker} @ {fmt_cur(price)} recorded.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to save transaction: {e}")
+                if errors:
+                    for e in errors: st.error(e)
+                else:
+                    try:
+                        portfolio().add_transaction(
+                            ticker=ticker, name=h.name if h else name,
+                            asset_type=h.asset_type if h else asset_type,
+                            action=action.lower(), quantity=quantity,
+                            price=price, date=str(txn_date), commission=commission,
+                        )
+                        invalidate_prices()
+                        st.session_state.news_cache = {}
+                        st.success(f"✓ {action} {quantity:,.4f} × {ticker} @ {fmt_cur(price)} recorded.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to save transaction: {e}")
 
-    with st.expander("📖  Ticker format guide"):
-        st.markdown("""
+        with st.expander("📖  Ticker format guide"):
+            st.markdown("""
 | Asset | Format | Example |
 |---|---|---|
 | US Stocks / ETFs | Plain ticker | `AAPL`, `MSFT`, `SPY` |
@@ -1227,7 +1225,103 @@ def render_add_transaction():
 | French stocks | Ticker + `.PA` | `MC.PA` |
 | UK stocks | Ticker + `.L` | `SHEL.L` |
 | Crypto | Ticker + `-USD` | `BTC-USD`, `ETH-USD` |
-        """)
+            """)
+
+    # ── Tab 2: Portfolio Performance import ───────────────────────────────────
+    with tab_import:
+        st.markdown(
+            "Upload the **Alle Buchungen** CSV export from Portfolio Performance. "
+            "Buys, sells and dividends are imported. Cash flows and fractional "
+            "deliveries (Einlieferung) are automatically skipped.")
+        st.caption("Export path in PP: File → Export → Alle Buchungen (CSV)")
+
+        uploaded = st.file_uploader("Choose CSV file", type=["csv"],
+                                    label_visibility="collapsed")
+        if not uploaded:
+            return
+
+        file_bytes = uploaded.read()
+        rows, parse_warnings = parse_pp_csv(file_bytes)
+
+        for w in parse_warnings:
+            st.warning(w)
+
+        if not rows:
+            st.error("No importable rows found. Check that this is a valid Portfolio Performance export.")
+            return
+
+        # Preview
+        buys      = [r for r in rows if r.row_type == "buy"]
+        sells     = [r for r in rows if r.row_type == "sell"]
+        dividends = [r for r in rows if r.row_type == "dividend"]
+
+        _section("Preview")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Buys",      len(buys))
+        c2.metric("Sells",     len(sells))
+        c3.metric("Dividends", len(dividends))
+
+        preview_data = []
+        for r in rows:
+            preview_data.append({
+                "Type":       r.row_type.capitalize(),
+                "Symbol":     r.symbol,
+                "Name":       r.name[:28] + "…" if len(r.name) > 28 else r.name,
+                "Date":       r.date,
+                "Qty":        f"{r.quantity:,.6f}" if r.row_type != "dividend" else "—",
+                "Price":      f"€{r.price:,.4f}"  if r.price  else "—",
+                "Amount":     f"€{r.amount:,.2f}",
+                "Commission": f"€{r.commission:,.2f}" if r.commission else "—",
+            })
+        st.dataframe(pd.DataFrame(preview_data),
+                     use_container_width=True, hide_index=True, height=280)
+
+        # Asset type per ticker
+        _section("Asset Types")
+        st.caption("Confirm the asset type for each ticker — check that ETFs are marked as 'etf'.")
+        from tracker.importer import _infer_asset_type
+        symbols = sorted({r.symbol for r in rows})
+        asset_type_map = {}
+        cols = st.columns(min(len(symbols), 4))
+        for i, sym in enumerate(symbols):
+            existing_h = portfolio().get_holding(sym)
+            default = existing_h.asset_type if existing_h else _infer_asset_type(sym)
+            with cols[i % 4]:
+                asset_type_map[sym] = st.selectbox(
+                    sym, ["stock", "etf", "crypto"],
+                    index=["stock","etf","crypto"].index(default)
+                          if default in ["stock","etf","crypto"] else 0,
+                    key=f"import_atype_{sym}")
+
+        # Duplicate warning
+        _section("Import")
+        p = portfolio()
+        n_txns = sum(len(h.transactions) for h in p.holdings.values())
+        n_divs = len(p.all_dividends())
+        if n_txns > 0 or n_divs > 0:
+            st.info(
+                f"Your portfolio already has **{n_txns}** transaction(s) and "
+                f"**{n_divs}** dividend(s). Duplicates are skipped automatically.")
+
+        if st.button("⇩  Import Now", type="primary"):
+            with st.spinner("Importing…"):
+                try:
+                    result = execute_import(rows, portfolio(), asset_type_map)
+                    invalidate_prices()
+                except Exception as e:
+                    st.error(f"Import failed: {e}"); return
+
+            if result.total_imported > 0:
+                st.success(
+                    f"✓ Imported **{result.imported_buys}** buy(s), "
+                    f"**{result.imported_sells}** sell(s), "
+                    f"**{result.imported_dividends}** dividend(s).")
+            if result.skipped_duplicate > 0:
+                st.warning(f"{result.skipped_duplicate} duplicate(s) skipped.")
+            for err in result.errors:
+                st.error(f"Error: {err}")
+            if result.total_imported > 0:
+                st.rerun()
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────
 def render_benchmark():
@@ -2296,7 +2390,6 @@ def main():
             "Snapshot History":   render_snapshot_history,
             "Quant Metrics":      render_quant,
             "Tax & Income":       render_tax,
-            "Import":             render_import,
         }.get(page, render_dashboard)()
     except Exception as e:
         _render_crash(e, f"Error on page '{page}': {e}")

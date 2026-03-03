@@ -93,9 +93,15 @@ def _parse_de_number(s: str) -> Optional[float]:
 
 
 def _parse_date(s: str) -> Optional[str]:
-    """DD.MM.YYYY [HH:MM] → YYYY-MM-DD"""
+    """Parse any of the date formats PP might export, return YYYY-MM-DD."""
     s = s.strip()
-    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y"):
+    for fmt in (
+        "%d.%m.%Y %H:%M",       # 02.03.2026 16:03  (raw German export)
+        "%d.%m.%Y",             # 02.03.2026
+        "%Y-%m-%d %H:%M:%S",    # 2026-03-02 16:03:00  (Streamlit-parsed CSV)
+        "%Y-%m-%d %H:%M",       # 2026-03-02 16:03
+        "%Y-%m-%d",             # 2026-03-02
+    ):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
