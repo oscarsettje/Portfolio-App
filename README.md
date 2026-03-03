@@ -12,6 +12,7 @@ A personal portfolio tracker built with Python and Streamlit. Tracks stocks, ETF
 | **Benchmark** | Compare portfolio vs MSCI World, S&P 500, NASDAQ 100 and MSCI Emerging Markets |
 | **Portfolio Analysis** | Correlation matrix, sector breakdown, diversification score, stress testing (preset and custom scenarios) |
 | **Quant Metrics** | Sharpe, Sortino, Jensen's Alpha, Beta, VaR, CVaR, Calmar ratio, rolling performance charts |
+| **Plan** | Rebalancing tool with drift analysis and trade suggestions, monthly savings plan tracker with projections, investment goal setting with scenario modelling |
 | **Tax & Income** | German Abgeltungsteuer estimates (25% + 5.5% Soli), FIFO cost basis, Sparerpauschbetrag (€1,000), dividend tracking with withholding tax |
 | **Snapshot History** | Manually record portfolio value over time to track growth |
 
@@ -87,6 +88,7 @@ portfolio_tracker/
     ├── analysis.py           # Correlation, sector breakdown, stress testing
     ├── quant.py              # Sharpe, Sortino, Alpha, Beta, VaR, rolling metrics
     ├── tax.py                # German Abgeltungsteuer — FIFO, Sparerpauschbetrag
+    ├── planner.py            # Rebalancing, savings plan, investment goal calculations
     ├── exporter.py           # Excel (5 sheets) and CSV export
     └── validation.py         # Input validation for tickers, transactions, dividends
 ```
