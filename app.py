@@ -23,6 +23,7 @@ from tracker.validation import (validate_ticker, validate_transaction,
     validate_transaction_list, validate_dividend, validate_name)
 from tracker.prices import PriceFetcher, _close_from_download
 import tracker.exporter as exporter
+from tracker.importer import parse_pp_csv, execute_import, IMPORT_AS_BUY, IMPORT_AS_SELL, IMPORT_AS_DIVIDEND
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Portfolio Tracker", page_icon="📈",
@@ -647,7 +648,7 @@ def _render_news(tickers: List[str]):
 </div>""", unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-PAGES = ["Dashboard","Holdings","Add Transaction",
+PAGES = ["Dashboard","Holdings","Add Transaction","Import",
          "Benchmark","Portfolio Analysis","Quant Metrics","Tax & Income","Snapshot History"]
 
 def render_sidebar():
@@ -2140,6 +2141,121 @@ def render_tax():
         } for s in yearly]), use_container_width=True, hide_index=True)
 
 
+# ── Import ────────────────────────────────────────────────────────────────────
+def render_import():
+    _page_header("⇩", "Import", "Import transactions from Portfolio Performance")
+
+    st.markdown(
+        "Upload the **Alle Buchungen** CSV export from Portfolio Performance. "
+        "Buys, sells and dividends are imported. Cash flows (Einlage/Entnahme) "
+        "and fractional deliveries (Einlieferung) are automatically skipped.",
+        unsafe_allow_html=False)
+
+    uploaded = st.file_uploader("Choose CSV file", type=["csv"],
+                                 label_visibility="collapsed")
+    if not uploaded:
+        st.caption("Export from Portfolio Performance: File → Export → Alle Buchungen (CSV)")
+        return
+
+    file_bytes = uploaded.read()
+    rows, parse_warnings = parse_pp_csv(file_bytes)
+
+    for w in parse_warnings:
+        st.warning(w)
+
+    if not rows:
+        st.error("No importable rows found. Check that the file is a valid Portfolio Performance CSV export.")
+        return
+
+    # ── Preview ────────────────────────────────────────────────────────────────
+    buys      = [r for r in rows if r.row_type == "buy"]
+    sells     = [r for r in rows if r.row_type == "sell"]
+    dividends = [r for r in rows if r.row_type == "dividend"]
+
+    _section("Preview")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Buys",      len(buys))
+    c2.metric("Sells",     len(sells))
+    c3.metric("Dividends", len(dividends))
+
+    # Show preview table
+    preview_data = []
+    for r in rows:
+        preview_data.append({
+            "Type":    r.row_type.capitalize(),
+            "Symbol":  r.symbol,
+            "Name":    r.name[:30] + "…" if len(r.name) > 30 else r.name,
+            "Date":    r.date,
+            "Qty":     f"{r.quantity:,.6f}" if r.row_type != "dividend" else "—",
+            "Price":   f"€{r.price:,.4f}" if r.price else "—",
+            "Amount":  f"€{r.amount:,.2f}",
+            "Commission": f"€{r.commission:,.2f}" if r.commission else "—",
+        })
+
+    st.dataframe(
+        pd.DataFrame(preview_data),
+        use_container_width=True, hide_index=True, height=300)
+
+    # ── Asset type overrides ───────────────────────────────────────────────────
+    symbols = sorted({r.symbol for r in rows})
+    _section("Asset Types")
+    st.caption("Confirm the asset type for each ticker. The app auto-detects most — check crypto and ETFs.")
+
+    asset_type_map = {}
+    cols = st.columns(min(len(symbols), 4))
+    for i, sym in enumerate(symbols):
+        from tracker.importer import _infer_asset_type
+        default = _infer_asset_type(sym)
+        # Check if already in portfolio
+        existing = portfolio().get_holding(sym)
+        if existing:
+            default = existing.asset_type
+        with cols[i % 4]:
+            asset_type_map[sym] = st.selectbox(
+                sym, ["stock", "etf", "crypto"],
+                index=["stock", "etf", "crypto"].index(default) if default in ["stock", "etf", "crypto"] else 0,
+                key=f"import_atype_{sym}")
+
+    # ── Execute ────────────────────────────────────────────────────────────────
+    _section("Import")
+    existing_p = portfolio()
+    n_existing_txns = sum(len(h.transactions) for h in existing_p.holdings.values())
+    n_existing_divs = len(existing_p.all_dividends())
+
+    if n_existing_txns > 0 or n_existing_divs > 0:
+        st.info(
+            f"Your portfolio already has **{n_existing_txns} transaction(s)** and "
+            f"**{n_existing_divs} dividend(s)**. "
+            f"Duplicates (same ticker + date + quantity) will be skipped automatically.")
+
+    if st.button("⇩  Import Now", type="primary", use_container_width=False):
+        with st.spinner("Importing…"):
+            try:
+                result = execute_import(rows, portfolio(), asset_type_map)
+                invalidate_prices()
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+                return
+
+        # ── Results ────────────────────────────────────────────────────────────
+        if result.total_imported > 0:
+            st.success(
+                f"✓ Imported **{result.imported_buys}** buy(s), "
+                f"**{result.imported_sells}** sell(s), "
+                f"**{result.imported_dividends}** dividend(s).")
+
+        col_a, col_b = st.columns(2)
+        if result.skipped_duplicate > 0:
+            col_a.warning(f"{result.skipped_duplicate} duplicate(s) skipped.")
+        if result.skipped_type > 0:
+            col_b.info(f"{result.skipped_type} unsupported row type(s) skipped.")
+        for err in result.errors:
+            st.error(f"Error: {err}")
+
+        if result.total_imported > 0:
+            st.rerun()
+
+
 def _render_crash(error: Exception, context: str = ""):
     """Friendly full-page error for unrecoverable crashes."""
     import traceback
@@ -2180,6 +2296,7 @@ def main():
             "Snapshot History":   render_snapshot_history,
             "Quant Metrics":      render_quant,
             "Tax & Income":       render_tax,
+            "Import":             render_import,
         }.get(page, render_dashboard)()
     except Exception as e:
         _render_crash(e, f"Error on page '{page}': {e}")
