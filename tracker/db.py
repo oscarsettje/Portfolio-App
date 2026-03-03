@@ -210,6 +210,37 @@ def _migrate(conn: sqlite3.Connection) -> int:
         CREATE INDEX IF NOT EXISTS idx_div_user   ON dividends(user_id);
         CREATE INDEX IF NOT EXISTS idx_snap_user  ON snapshots(user_id);
     """)
+
+    # ── rebalancing targets (one row per user_id+ticker) ──────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rebalance_targets (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            ticker     TEXT    NOT NULL,
+            target_pct REAL    NOT NULL CHECK(target_pct >= 0 AND target_pct <= 100),
+            UNIQUE(user_id, ticker)
+        )""")
+
+    # ── savings plan (one row per user_id+ticker) ─────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS savings_plans (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id           INTEGER NOT NULL,
+            ticker            TEXT    NOT NULL,
+            monthly_amount    REAL    NOT NULL CHECK(monthly_amount >= 0),
+            UNIQUE(user_id, ticker)
+        )""")
+
+    # ── investment goals (one row per user — we allow one active goal) ────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS investment_goals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL UNIQUE,
+            target_value    REAL    NOT NULL,
+            target_date     TEXT,
+            assumed_return  REAL    NOT NULL DEFAULT 0.07
+        )""")
+
     conn.execute("PRAGMA foreign_keys=ON")
     conn.commit()
     return default_uid
@@ -480,6 +511,74 @@ class Database:
                 json.dump([asdict(s) for s in self.get_snapshots(user_id)], f, indent=2)
         except Exception as e:
             print(f"[Warning] Snapshot backup failed for {username}: {e}")
+
+    # ── Rebalancing targets ───────────────────────────────────────────────────
+
+    def get_rebalance_targets(self, user_id: int) -> Dict[str, float]:
+        """Returns {ticker: target_pct} for the user."""
+        rows = self.conn.execute(
+            "SELECT ticker, target_pct FROM rebalance_targets WHERE user_id=?",
+            (user_id,)
+        ).fetchall()
+        return {r["ticker"]: r["target_pct"] for r in rows}
+
+    def set_rebalance_targets(self, user_id: int,
+                              targets: Dict[str, float]) -> None:
+        """Replace all targets for a user atomically."""
+        with _tx(self.conn):
+            self.conn.execute(
+                "DELETE FROM rebalance_targets WHERE user_id=?", (user_id,))
+            self.conn.executemany("""
+                INSERT INTO rebalance_targets (user_id, ticker, target_pct)
+                VALUES (?, ?, ?)
+            """, [(user_id, t, p) for t, p in targets.items() if p > 0])
+
+    # ── Savings plans ─────────────────────────────────────────────────────────
+
+    def get_savings_plans(self, user_id: int) -> Dict[str, float]:
+        """Returns {ticker: monthly_amount}."""
+        rows = self.conn.execute(
+            "SELECT ticker, monthly_amount FROM savings_plans WHERE user_id=?",
+            (user_id,)
+        ).fetchall()
+        return {r["ticker"]: r["monthly_amount"] for r in rows}
+
+    def set_savings_plans(self, user_id: int,
+                          plans: Dict[str, float]) -> None:
+        """Replace all savings plan entries for a user atomically."""
+        with _tx(self.conn):
+            self.conn.execute(
+                "DELETE FROM savings_plans WHERE user_id=?", (user_id,))
+            self.conn.executemany("""
+                INSERT INTO savings_plans (user_id, ticker, monthly_amount)
+                VALUES (?, ?, ?)
+            """, [(user_id, t, a) for t, a in plans.items() if a > 0])
+
+    # ── Investment goal ───────────────────────────────────────────────────────
+
+    def get_goal(self, user_id: int) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM investment_goals WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_goal(self, user_id: int, target_value: float,
+                 target_date: Optional[str], assumed_return: float) -> None:
+        with _tx(self.conn):
+            self.conn.execute("""
+                INSERT INTO investment_goals
+                    (user_id, target_value, target_date, assumed_return)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    target_value   = excluded.target_value,
+                    target_date    = excluded.target_date,
+                    assumed_return = excluded.assumed_return
+            """, (user_id, target_value, target_date, assumed_return))
+
+    def delete_goal(self, user_id: int) -> None:
+        with _tx(self.conn):
+            self.conn.execute(
+                "DELETE FROM investment_goals WHERE user_id=?", (user_id,))
 
     # ── Utility ───────────────────────────────────────────────────────────────
 

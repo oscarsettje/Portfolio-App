@@ -649,7 +649,7 @@ def _render_news(tickers: List[str]):
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 PAGES = ["Dashboard","Holdings","Add Transaction",
-         "Benchmark","Portfolio Analysis","Quant Metrics","Tax & Income","Snapshot History"]
+         "Plan","Benchmark","Portfolio Analysis","Quant Metrics","Tax & Income","Snapshot History"]
 
 def render_sidebar():
     with st.sidebar:
@@ -1322,6 +1322,411 @@ def render_add_transaction():
                 st.error(f"Error: {err}")
             if result.total_imported > 0:
                 st.rerun()
+
+# ── Plan ──────────────────────────────────────────────────────────────────────
+def render_plan():
+    from tracker.planner import (
+        compute_rebalance, compute_savings_plan_status,
+        compute_goal_status, estimate_monthly_savings,
+        project_portfolio,
+    )
+    _page_header("◎", "Plan", "Rebalancing · Savings Plan · Investment Goal")
+
+    holdings = portfolio().all_holdings()
+    prices   = get_prices()
+    uid      = st.session_state.user_id
+
+    total_value = sum(
+        h.quantity * prices[h.ticker]
+        for h in holdings if prices.get(h.ticker) and h.quantity > 0
+    )
+
+    tab_rebal, tab_savings, tab_goal = st.tabs([
+        "⟳  Rebalancing", "📅  Savings Plan", "🎯  Investment Goal"
+    ])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — REBALANCING
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_rebal:
+        if not holdings:
+            st.info("Add some holdings first."); return
+
+        # Load saved targets
+        saved_targets = db().get_rebalance_targets(uid)
+
+        _section("Target Allocations")
+        st.caption("Set your target percentage for each holding. Must sum to 100%.")
+
+        # Build target input per holding
+        target_inputs: Dict[str, float] = {}
+        priced_holdings = [h for h in holdings if prices.get(h.ticker) and h.quantity > 0]
+
+        cols_per_row = 4
+        for i in range(0, len(priced_holdings), cols_per_row):
+            row_cols = st.columns(cols_per_row)
+            for j, h in enumerate(priced_holdings[i:i+cols_per_row]):
+                default = saved_targets.get(h.ticker, 0.0)
+                with row_cols[j]:
+                    target_inputs[h.ticker] = st.number_input(
+                        f"{h.ticker}",
+                        min_value=0.0, max_value=100.0,
+                        value=float(default), step=1.0, format="%.1f",
+                        key=f"target_{h.ticker}",
+                        help=h.name,
+                    )
+
+        total_target = sum(target_inputs.values())
+        target_ok    = abs(total_target - 100.0) < 0.1
+
+        # Show sum indicator
+        sum_color = "#4caf7d" if target_ok else "#e05c5c"
+        st.markdown(
+            f'<div style="font-family:\'DM Mono\',monospace;font-size:.85rem;'
+            f'color:{sum_color};margin:6px 0 12px">'
+            f'Total: {total_target:.1f}% {"✓" if target_ok else f"— needs to be 100%"}'
+            f'</div>', unsafe_allow_html=True)
+
+        c_save, c_blank = st.columns([1, 3])
+        if c_save.button("Save Targets", type="primary", disabled=not target_ok):
+            try:
+                db().set_rebalance_targets(uid, target_inputs)
+                saved_targets = target_inputs.copy()
+                st.success("✓ Targets saved.")
+            except Exception as e:
+                st.error(f"Failed to save: {e}")
+
+        if not target_ok:
+            st.divider()
+            st.caption("Save valid targets (summing to 100%) to see rebalancing analysis.")
+        else:
+            st.divider()
+            _section("Rebalancing Analysis")
+
+            c1, c2 = st.columns(2)
+            commission  = c1.number_input("Broker commission per trade (€)",
+                                          min_value=0.0, value=1.0, step=0.5,
+                                          format="%.2f", key="rebal_commission")
+            new_cash    = c2.number_input("New cash to deploy (€)",
+                                          min_value=0.0, value=0.0, step=100.0,
+                                          format="%.2f", key="rebal_cash",
+                                          help="Add fresh cash to invest alongside rebalancing")
+            drift_thresh = st.slider("Only flag positions drifting more than",
+                                     1.0, 20.0, 5.0, 0.5,
+                                     format="%.1f%%", key="drift_thresh")
+
+            rows, total_w_cash, _ = compute_rebalance(
+                holdings, prices, saved_targets,
+                commission=commission, new_cash=new_cash,
+                drift_threshold=drift_thresh,
+            )
+
+            if not rows:
+                st.info("No priced holdings to analyse.")
+            else:
+                # Summary metrics
+                buys  = [r for r in rows if r.trade_value > 0]
+                sells = [r for r in rows if r.trade_value < 0]
+                holds = [r for r in rows if r.trade_value == 0]
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Portfolio + Cash", f"€{total_w_cash:,.2f}")
+                m2.metric("Buys needed",  len(buys),  delta=None)
+                m3.metric("Sells needed", len(sells), delta=None)
+                m4.metric("No action",    len(holds),  delta=None)
+
+                # Main table
+                table_data = []
+                for r in rows:
+                    drift_str = f"{r.drift_pct:+.1f}%"
+                    if   r.trade_value > 0:  action_str = f"BUY  €{r.trade_value:,.2f} ({r.trade_qty:+.4f} units)"
+                    elif r.trade_value < 0:  action_str = f"SELL €{abs(r.trade_value):,.2f} ({r.trade_qty:+.4f} units)"
+                    else:                    action_str = "Hold"
+
+                    table_data.append({
+                        "Ticker":      r.ticker,
+                        "Name":        r.name[:25] + "…" if len(r.name) > 25 else r.name,
+                        "Current €":   f"€{r.current_val:,.2f}",
+                        "Current %":   f"{r.current_pct:.1f}%",
+                        "Target %":    f"{r.target_pct:.1f}%",
+                        "Drift":       drift_str,
+                        "Action":      action_str,
+                    })
+
+                st.dataframe(pd.DataFrame(table_data),
+                             use_container_width=True, hide_index=True)
+
+                # Allocation donut: current vs target
+                st.divider()
+                _section("Current vs Target Allocation")
+                col_curr, col_tgt = st.columns(2)
+
+                curr_labels = [r.ticker for r in rows]
+                curr_vals   = [r.current_val for r in rows]
+                tgt_vals    = [(r.target_pct / 100) * total_w_cash for r in rows]
+
+                fig_curr = go.Figure(go.Pie(
+                    labels=curr_labels, values=curr_vals,
+                    hole=0.55, textinfo="label+percent",
+                    marker=dict(line=dict(color=BG, width=2)),
+                ))
+                fig_curr.update_layout(**_chart_layout(title="Current", height=300))
+                col_curr.plotly_chart(fig_curr, use_container_width=True)
+
+                fig_tgt = go.Figure(go.Pie(
+                    labels=curr_labels, values=tgt_vals,
+                    hole=0.55, textinfo="label+percent",
+                    marker=dict(line=dict(color=BG, width=2)),
+                ))
+                fig_tgt.update_layout(**_chart_layout(title="Target", height=300))
+                col_tgt.plotly_chart(fig_tgt, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — SAVINGS PLAN
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_savings:
+        if not holdings:
+            st.info("Add some holdings first.")
+        else:
+            saved_plans = db().get_savings_plans(uid)
+
+            _section("Monthly Contribution Targets")
+            st.caption("Set how much you plan to invest in each holding per month.")
+
+            plan_inputs: Dict[str, float] = {}
+            priced_holdings = [h for h in holdings if prices.get(h.ticker) and h.quantity > 0]
+
+            for i in range(0, len(priced_holdings), 4):
+                row_cols = st.columns(4)
+                for j, h in enumerate(priced_holdings[i:i+4]):
+                    default = saved_plans.get(h.ticker, 0.0)
+                    with row_cols[j]:
+                        plan_inputs[h.ticker] = st.number_input(
+                            f"{h.ticker} (€/mo)",
+                            min_value=0.0, value=float(default),
+                            step=10.0, format="%.2f",
+                            key=f"plan_{h.ticker}", help=h.name,
+                        )
+
+            total_monthly = sum(plan_inputs.values())
+            st.markdown(
+                f'<div style="font-family:\'DM Mono\',monospace;font-size:.85rem;'
+                f'color:#888;margin:6px 0 12px">'
+                f'Total planned: €{total_monthly:,.2f} / month</div>',
+                unsafe_allow_html=True)
+
+            if st.button("Save Plan", type="primary", key="save_plan"):
+                try:
+                    db().set_savings_plans(uid, plan_inputs)
+                    saved_plans = plan_inputs.copy()
+                    st.success("✓ Savings plan saved.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+
+            if any(v > 0 for v in saved_plans.values()):
+                st.divider()
+                _section("This Month's Progress")
+                plan_rows = compute_savings_plan_status(holdings, prices, saved_plans)
+
+                status_data = []
+                for r in plan_rows:
+                    status_data.append({
+                        "Ticker":    r.ticker,
+                        "Name":      r.name[:25] + "…" if len(r.name) > 25 else r.name,
+                        "Planned":   f"€{r.planned:,.2f}",
+                        "Invested":  f"€{r.actual_mtd:,.2f}",
+                        "Remaining": f"€{r.remaining:,.2f}" if r.remaining > 0 else "—",
+                        "Status":    "✓ On track" if r.on_track else "⚠ Behind",
+                    })
+                st.dataframe(pd.DataFrame(status_data),
+                             use_container_width=True, hide_index=True)
+
+                st.divider()
+                _section("Portfolio Projection")
+                proj_years  = st.slider("Projection horizon (years)",
+                                        1, 40, 20, key="proj_years")
+                proj_return = st.slider("Assumed annual return",
+                                        1, 15, 7, format="%d%%", key="proj_return") / 100
+
+                monthly_total = sum(saved_plans.values())
+                points = project_portfolio(total_value, monthly_total,
+                                           proj_return, proj_years)
+                dates  = [p[0] for p in points]
+                vals   = [p[1] for p in points]
+
+                fig_proj = go.Figure()
+                fig_proj.add_trace(go.Scatter(
+                    x=dates, y=vals, name="Projected Value",
+                    line=dict(color=BLUE, width=2),
+                    fill="tozeroy", fillcolor="rgba(91,155,213,0.07)",
+                    hovertemplate="<b>%{x|%b %Y}</b><br>€%{y:,.0f}<extra></extra>",
+                ))
+                fig_proj.add_hline(y=total_value, line_color="#333",
+                                   line_dash="dash", line_width=1,
+                                   annotation_text="Today")
+                fig_proj.update_layout(**_chart_layout(height=360))
+                fig_proj.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+                st.plotly_chart(fig_proj, use_container_width=True)
+
+                final_val = vals[-1] if vals else 0
+                gain      = final_val - total_value
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Today",              f"€{total_value:,.0f}")
+                m2.metric(f"In {proj_years}y",  f"€{final_val:,.0f}")
+                m3.metric("Total gain",          f"€{gain:,.0f}",
+                          delta=f"+{gain/total_value*100:.0f}%" if total_value > 0 else None)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — INVESTMENT GOAL
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_goal:
+        saved_goal = db().get_goal(uid)
+
+        _section("Set Your Goal")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            target_value = st.number_input(
+                "Target portfolio value (€)",
+                min_value=1000.0,
+                value=float(saved_goal["target_value"]) if saved_goal else 100000.0,
+                step=5000.0, format="%.0f", key="goal_target")
+        with c2:
+            use_date   = st.checkbox("Set a target date",
+                                     value=bool(saved_goal and saved_goal.get("target_date")),
+                                     key="goal_use_date")
+            target_date = None
+            if use_date:
+                from datetime import date as _date
+                default_td = (datetime.strptime(saved_goal["target_date"], "%Y-%m-%d").date()
+                              if saved_goal and saved_goal.get("target_date") else
+                              _date(date.today().year + 10, 1, 1))
+                target_date = st.date_input("Target date", value=default_td,
+                                            min_value=date.today(), key="goal_date")
+        with c3:
+            assumed_return = st.slider(
+                "Assumed annual return",
+                1, 15,
+                int(round((saved_goal["assumed_return"] if saved_goal else 0.07) * 100)),
+                format="%d%%", key="goal_return") / 100
+
+        col_save_g, col_del_g, _ = st.columns([1, 1, 3])
+        if col_save_g.button("Save Goal", type="primary", key="save_goal"):
+            try:
+                db().set_goal(uid, target_value,
+                              str(target_date) if target_date else None,
+                              assumed_return)
+                st.success("✓ Goal saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to save: {e}")
+        if saved_goal and col_del_g.button("Delete Goal", key="del_goal"):
+            db().delete_goal(uid)
+            st.rerun()
+
+        if not saved_goal:
+            st.caption("Save a goal to see projections.")
+        else:
+            st.divider()
+            _section("Progress")
+
+            # Estimate monthly savings from recent transactions
+            monthly_savings_est = estimate_monthly_savings(holdings)
+            savings_plans = db().get_savings_plans(uid)
+            monthly_savings_planned = sum(savings_plans.values())
+            # Use savings plan if defined, else estimate from transactions
+            monthly_savings = monthly_savings_planned if monthly_savings_planned > 0 \
+                              else monthly_savings_est
+
+            td = (datetime.strptime(saved_goal["target_date"], "%Y-%m-%d").date()
+                  if saved_goal.get("target_date") else None)
+
+            status = compute_goal_status(
+                current_value=total_value,
+                monthly_savings=monthly_savings,
+                target_value=saved_goal["target_value"],
+                assumed_return=saved_goal["assumed_return"],
+                target_date=td,
+                horizon_years=40,
+            )
+
+            # Progress bar
+            pct = min(status.progress_pct, 100)
+            bar_color = GAIN if pct >= 100 else BLUE
+            st.markdown(f"""
+            <div style="margin:12px 0 4px">
+              <div style="display:flex;justify-content:space-between;
+                          font-family:'DM Mono',monospace;font-size:.75rem;color:#666;margin-bottom:6px">
+                <span>€{status.current_value:,.0f}</span>
+                <span>Target: €{status.target_value:,.0f}</span>
+              </div>
+              <div style="background:#1a1a1a;border-radius:8px;height:14px;overflow:hidden">
+                <div style="background:{bar_color};width:{pct:.1f}%;height:100%;
+                            border-radius:8px;transition:width .4s"></div>
+              </div>
+              <div style="font-family:'DM Mono',monospace;font-size:.72rem;
+                          color:#555;margin-top:4px;text-align:right">{pct:.1f}% of goal</div>
+            </div>""", unsafe_allow_html=True)
+
+            # Key metrics
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Current Value",    f"€{status.current_value:,.0f}")
+            m1.metric("Target",           f"€{status.target_value:,.0f}")
+            m2.metric("Monthly Savings",  f"€{status.monthly_savings:,.0f}",
+                      help="From your savings plan, or estimated from last 3 months of transactions")
+            m2.metric("Assumed Return",   f"{status.assumed_return*100:.0f}%/yr")
+
+            if status.projected_date:
+                months = status.months_to_goal
+                yrs, mos = divmod(months, 12)
+                time_str = f"{yrs}y {mos}m" if yrs else f"{mos}m"
+                m3.metric("Estimated Time to Goal", time_str)
+                m3.metric("Projected Date", status.projected_date.strftime("%b %Y"))
+
+            if status.required_monthly is not None and status.target_date:
+                m4.metric("Required Monthly Savings",
+                          f"€{status.required_monthly:,.0f}",
+                          delta=f"€{status.required_monthly - status.monthly_savings:+,.0f} vs current",
+                          delta_color="inverse")
+
+            # Scenario chart
+            st.divider()
+            _section("Scenario Projections")
+            scenario_colors = {
+                "Pessimistic (4%)":  LOSS,
+                "Optimistic (10%)":  GAIN,
+            }
+            # The base scenario label is dynamic — find it
+            base_label = [k for k in status.scenarios if "Base" in k]
+            if base_label:
+                scenario_colors[base_label[0]] = BLUE
+
+            fig_goal = go.Figure()
+            for label, points in status.scenarios.items():
+                dates = [p[0] for p in points]
+                vals  = [p[1] for p in points]
+                color = scenario_colors.get(label, "#aaa")
+                dash  = "solid" if "Base" in label else "dot"
+                fig_goal.add_trace(go.Scatter(
+                    x=dates, y=vals, name=label,
+                    line=dict(color=color, width=2 if "Base" in label else 1.5, dash=dash),
+                    hovertemplate=f"<b>{label}</b><br>%{{x|%b %Y}}<br>€%{{y:,.0f}}<extra></extra>",
+                ))
+
+            # Target line
+            fig_goal.add_hline(
+                y=status.target_value,
+                line_color="#f0c040", line_dash="dash", line_width=1.5,
+                annotation_text=f"Goal: €{status.target_value:,.0f}",
+                annotation_font_color="#f0c040",
+            )
+            # Today marker
+            fig_goal.add_hline(y=total_value, line_color="#333",
+                               line_dash="dot", line_width=1,
+                               annotation_text="Today")
+            fig_goal.update_layout(**_chart_layout(height=420))
+            fig_goal.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+            st.plotly_chart(fig_goal, use_container_width=True)
+
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────
 def render_benchmark():
@@ -2390,6 +2795,7 @@ def main():
             "Dashboard":          render_dashboard,
             "Holdings":           render_holdings,
             "Add Transaction":    render_add_transaction,
+            "Plan":               render_plan,
             "Benchmark":          render_benchmark,
             "Portfolio Analysis": render_analysis,
             "Snapshot History":   render_snapshot_history,
