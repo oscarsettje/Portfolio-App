@@ -211,6 +211,11 @@ def _migrate(conn: sqlite3.Connection) -> int:
         CREATE INDEX IF NOT EXISTS idx_snap_user  ON snapshots(user_id);
     """)
 
+    # ── notes column on holdings (added in v3) ───────────────────────────────
+    if _has_table(conn, "holdings") and not _has_col(conn, "holdings", "notes"):
+        conn.execute("ALTER TABLE holdings ADD COLUMN notes TEXT DEFAULT ''")
+        conn.commit()
+
     # ── rebalancing targets (one row per user_id+ticker) ──────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rebalance_targets (
@@ -511,6 +516,19 @@ class Database:
                 json.dump([asdict(s) for s in self.get_snapshots(user_id)], f, indent=2)
         except Exception as e:
             print(f"[Warning] Snapshot backup failed for {username}: {e}")
+
+    def get_holding_notes(self, user_id: int, ticker: str) -> str:
+        row = self.conn.execute(
+            "SELECT notes FROM holdings WHERE user_id=? AND ticker=?",
+            (user_id, ticker)
+        ).fetchone()
+        return row["notes"] or "" if row else ""
+
+    def set_holding_notes(self, user_id: int, ticker: str, notes: str) -> None:
+        with _tx(self.conn):
+            self.conn.execute(
+                "UPDATE holdings SET notes=? WHERE user_id=? AND ticker=?",
+                (notes, user_id, ticker))
 
     # ── Rebalancing targets ───────────────────────────────────────────────────
 
