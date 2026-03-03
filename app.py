@@ -1332,7 +1332,7 @@ def render_benchmark():
     if start_date is None:
         st.info("Add some transactions first."); return
 
-    st.info(f"Benchmarking from **{start_date.strftime('%d %b %Y')}**")
+    st.info(f"Benchmarking from **{start_date.strftime('%d %b %Y')}** · Returns are **time-weighted** (cash inflows from regular savings plans are neutralised so performance is comparable to a buy-and-hold index)")
     selected = st.multiselect("Compare against", list(INDICES.keys()), list(INDICES.keys()))
 
     cache = st.session_state.bench_cache
@@ -1380,7 +1380,7 @@ def render_benchmark():
     # Filter to currently selected indices
     index_series = {n: s for n, s in index_series.items() if n in selected}
 
-    norm_port    = normalise(port_series)
+    norm_port    = port_series   # already rebased to 100 (TWR)
     norm_indices = {n: normalise(s.reindex(port_series.index, method="ffill"))
                     for n, s in index_series.items()}
 
@@ -1409,15 +1409,20 @@ def render_benchmark():
     st.plotly_chart(fig_g, use_container_width=True)
 
     st.divider()
-    _section("Cumulative P&L over Time")
-    pnl_s = port_series - port_series.iloc[0]
+    _section("Cumulative Return %")
+    ret_port = norm_port - 100
     fig_pnl = go.Figure()
-    fig_pnl.add_trace(_scatter(pnl_s.index, pnl_s.values, "P&L", GAIN,
+    fig_pnl.add_trace(_scatter(ret_port.index, ret_port.values, "My Portfolio", GAIN,
         fill="tozeroy", fillcolor="rgba(76,175,125,0.08)",
-        tmpl="<b>P&L</b><br>€%{y:+,.2f}<extra></extra>"))
+        tmpl="<b>Portfolio</b><br>%{y:+.2f}%<extra></extra>"))
+    for n, s in norm_indices.items():
+        ret_s = s - 100
+        fig_pnl.add_trace(_scatter(ret_s.index, ret_s.values, n,
+            BENCH_COLOURS.get(n, "#aaa"), 1.5, dash="dot",
+            tmpl=f"<b>{n}</b><br>%{{y:+.2f}}%<extra></extra>"))
     fig_pnl.add_hline(y=0, line_color="#333", line_dash="dash", line_width=1)
     fig_pnl.update_layout(**_chart_layout(height=300))
-    fig_pnl.update_layout(yaxis=dict(gridcolor="#1e1e1e", tickprefix="€"))
+    fig_pnl.update_layout(yaxis=dict(gridcolor="#1e1e1e", ticksuffix="%"))
     st.plotly_chart(fig_pnl, use_container_width=True)
 
     st.divider()
@@ -1436,9 +1441,9 @@ def render_benchmark():
     _section("Key Statistics")
     STAT_COLS = ["Label","Total Return","Ann. Return","Ann. Volatility",
                  "Sharpe Ratio","Max Drawdown","Best Day","Worst Day","Days"]
-    all_stats = [compute_stats(port_series, "My Portfolio")] + [
-        compute_stats(s.reindex(port_series.index, method="ffill").dropna(), n)
-        for n, s in index_series.items()
+    all_stats = [compute_stats(norm_port, "My Portfolio")] + [
+        compute_stats(norm_indices[n].dropna(), n)
+        for n in index_series if n in norm_indices
     ]
     st.dataframe(
         pd.DataFrame(all_stats)[STAT_COLS].rename(columns={"Label":""}).style

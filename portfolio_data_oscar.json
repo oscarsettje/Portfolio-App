@@ -1,0 +1,560 @@
+{
+  "2PP.MU": {
+    "ticker": "2PP.MU",
+    "name": "PayPal Holdings Inc.",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2025-04-08",
+        "action": "buy",
+        "quantity": 4.0,
+        "price": 53.7,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  },
+  "8ZI.F": {
+    "ticker": "8ZI.F",
+    "name": "SCANDINAVIAN TOBACCO GROUP A",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2025-11-11",
+        "action": "buy",
+        "quantity": 18.0,
+        "price": 11.84,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  },
+  "BMT.MU": {
+    "ticker": "BMT.MU",
+    "name": "British American Tobacco p.l.c.",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-08-05",
+        "action": "buy",
+        "quantity": 2.0,
+        "price": 31.83,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-11-08",
+        "action": "buy",
+        "quantity": 2.0,
+        "price": 32.7,
+        "commission": 1.0
+      }
+    ],
+    "manual_price": null
+  },
+  "BTC": {
+    "ticker": "BTC",
+    "name": "Bitcoin",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-07-01",
+        "action": "buy",
+        "quantity": 0.00084805,
+        "price": 58958.79,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-07-02",
+        "action": "buy",
+        "quantity": 0.00256356,
+        "price": 58512.38,
+        "commission": 0.0
+      }
+    ],
+    "manual_price": null
+  },
+  "C7N.MU": {
+    "ticker": "C7N.MU",
+    "name": "Crocs, Inc.",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2025-04-17",
+        "action": "buy",
+        "quantity": 2.0,
+        "price": 78.68,
+        "commission": 0.99
+      },
+      {
+        "date": "2025-08-07",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 67.1,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  },
+  "CSKR.SW": {
+    "ticker": "CSKR.SW",
+    "name": "iSh MSCI Korea USD A",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-12-04",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 138.04,
+        "commission": 0.99
+      },
+      {
+        "date": "2024-12-05",
+        "action": "sell",
+        "quantity": 1.0,
+        "price": 135.44,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  },
+  "ETH": {
+    "ticker": "ETH",
+    "name": "Ethereum",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-07-02",
+        "action": "buy",
+        "quantity": 0.03110663,
+        "price": 3214.75,
+        "commission": 0.0
+      }
+    ],
+    "manual_price": null
+  },
+  "EUNL.DE": {
+    "ticker": "EUNL.DE",
+    "name": "iShares Core MSCI World UCITS ETF",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2023-05-24",
+        "action": "buy",
+        "quantity": 6.641006,
+        "price": 73.93,
+        "commission": 1.0
+      },
+      {
+        "date": "2024-08-02",
+        "action": "buy",
+        "quantity": 1.5434821,
+        "price": 90.7,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-08-02",
+        "action": "buy",
+        "quantity": 0.001324,
+        "price": 90.63,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-09-02",
+        "action": "buy",
+        "quantity": 1.46290491,
+        "price": 95.7,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-09-02",
+        "action": "buy",
+        "quantity": 0.00471,
+        "price": 95.54,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-10-02",
+        "action": "buy",
+        "quantity": 1.44460954,
+        "price": 96.91,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-11-04",
+        "action": "buy",
+        "quantity": 1.434573,
+        "price": 97.59,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-11-04",
+        "action": "buy",
+        "quantity": 0.123897,
+        "price": 97.58,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-12-02",
+        "action": "buy",
+        "quantity": 1.33581413,
+        "price": 104.81,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-01-02",
+        "action": "buy",
+        "quantity": 1.334998,
+        "price": 104.87,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-01-02",
+        "action": "buy",
+        "quantity": 0.008677,
+        "price": 104.87,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-02-03",
+        "action": "buy",
+        "quantity": 1.308166,
+        "price": 107.02,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-02-03",
+        "action": "buy",
+        "quantity": 0.000373,
+        "price": 107.24,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-03-03",
+        "action": "buy",
+        "quantity": 1.320132,
+        "price": 106.05,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-04-02",
+        "action": "buy",
+        "quantity": 1.428323,
+        "price": 98.02,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-04-07",
+        "action": "buy",
+        "quantity": 3.0,
+        "price": 86.41,
+        "commission": 1.0
+      },
+      {
+        "date": "2025-04-09",
+        "action": "buy",
+        "quantity": 3.0,
+        "price": 85.53,
+        "commission": 1.0
+      },
+      {
+        "date": "2025-05-02",
+        "action": "buy",
+        "quantity": 1.462966,
+        "price": 95.7,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-05-09",
+        "action": "buy",
+        "quantity": 0.08075,
+        "price": 96.59,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-06-02",
+        "action": "buy",
+        "quantity": 1.419187,
+        "price": 98.65,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-07-02",
+        "action": "buy",
+        "quantity": 1.397275,
+        "price": 100.2,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-08-04",
+        "action": "buy",
+        "quantity": 1.361007,
+        "price": 102.87,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-09-02",
+        "action": "buy",
+        "quantity": 1.347254,
+        "price": 103.92,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-10-02",
+        "action": "buy",
+        "quantity": 1.291155,
+        "price": 108.43,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-11-03",
+        "action": "buy",
+        "quantity": 1.25218,
+        "price": 111.81,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-12-02",
+        "action": "buy",
+        "quantity": 1.258992,
+        "price": 111.2,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-01-02",
+        "action": "buy",
+        "quantity": 1.256676,
+        "price": 111.41,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-02-02",
+        "action": "buy",
+        "quantity": 1.237972,
+        "price": 113.09,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-03-02",
+        "action": "buy",
+        "quantity": 1.229346,
+        "price": 113.88,
+        "commission": 0.0
+      }
+    ],
+    "manual_price": null
+  },
+  "IS3N.DE": {
+    "ticker": "IS3N.DE",
+    "name": "iShares Core MSCI EM IMI UCITS ETF USD (Acc)",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2023-05-24",
+        "action": "buy",
+        "quantity": 7.715482,
+        "price": 27.35,
+        "commission": 1.0
+      },
+      {
+        "date": "2024-08-02",
+        "action": "buy",
+        "quantity": 1.96065617,
+        "price": 30.6,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-09-02",
+        "action": "buy",
+        "quantity": 1.90766883,
+        "price": 31.45,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-10-02",
+        "action": "buy",
+        "quantity": 1.77346891,
+        "price": 33.83,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-11-04",
+        "action": "buy",
+        "quantity": 1.820996,
+        "price": 32.95,
+        "commission": 0.0
+      },
+      {
+        "date": "2024-12-02",
+        "action": "buy",
+        "quantity": 1.82937984,
+        "price": 32.8,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-01-02",
+        "action": "buy",
+        "quantity": 1.812907,
+        "price": 33.1,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-02-03",
+        "action": "buy",
+        "quantity": 1.815046,
+        "price": 33.06,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-03-03",
+        "action": "buy",
+        "quantity": 1.812469,
+        "price": 33.1,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-04-02",
+        "action": "buy",
+        "quantity": 1.846892,
+        "price": 32.49,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-04-07",
+        "action": "buy",
+        "quantity": 4.0,
+        "price": 28.71,
+        "commission": 1.0
+      },
+      {
+        "date": "2025-04-16",
+        "action": "buy",
+        "quantity": 4.0,
+        "price": 29.46,
+        "commission": 1.0
+      },
+      {
+        "date": "2025-05-02",
+        "action": "buy",
+        "quantity": 1.877522,
+        "price": 31.96,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-06-02",
+        "action": "buy",
+        "quantity": 1.85437,
+        "price": 32.36,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-07-02",
+        "action": "buy",
+        "quantity": 1.791312,
+        "price": 33.5,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-08-04",
+        "action": "buy",
+        "quantity": 1.745657,
+        "price": 34.37,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-09-02",
+        "action": "buy",
+        "quantity": 1.728409,
+        "price": 34.71,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-10-02",
+        "action": "buy",
+        "quantity": 1.600853,
+        "price": 37.48,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-11-03",
+        "action": "buy",
+        "quantity": 1.530885,
+        "price": 39.19,
+        "commission": 0.0
+      },
+      {
+        "date": "2025-12-02",
+        "action": "buy",
+        "quantity": 1.580319,
+        "price": 37.97,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-01-02",
+        "action": "buy",
+        "quantity": 1.531002,
+        "price": 39.19,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-02-02",
+        "action": "buy",
+        "quantity": 1.467172,
+        "price": 40.9,
+        "commission": 0.0
+      },
+      {
+        "date": "2026-03-02",
+        "action": "buy",
+        "quantity": 1.394991,
+        "price": 43.01,
+        "commission": 0.0
+      }
+    ],
+    "manual_price": null
+  },
+  "NLM.MU": {
+    "ticker": "NLM.MU",
+    "name": "FROSTA AG                     I",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2025-02-10",
+        "action": "buy",
+        "quantity": 2.0,
+        "price": 74.0,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  },
+  "PAH3.F": {
+    "ticker": "PAH3.F",
+    "name": "Porsche Automobil Holding SE",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2023-06-07",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 55.9,
+        "commission": 1.0
+      }
+    ],
+    "manual_price": null
+  },
+  "PPX.MU": {
+    "ticker": "PPX.MU",
+    "name": "Kering S.A.",
+    "asset_type": "stock",
+    "transactions": [
+      {
+        "date": "2024-10-15",
+        "action": "buy",
+        "quantity": 1.0,
+        "price": 225.9,
+        "commission": 0.99
+      }
+    ],
+    "manual_price": null
+  }
+}

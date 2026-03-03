@@ -56,52 +56,86 @@ def build_portfolio_value_series(
         start_date: date) -> Tuple[Optional[pd.Series], Optional[str]]:
     """
     Returns (series, None) on success or (None, error_message) on failure.
-    Partial data is used — tickers with no price history are skipped with a warning.
+
+    The series represents the **time-weighted portfolio value** — i.e. what
+    €100 invested proportionally at the start would be worth each day. This
+    makes it directly comparable to a buy-and-hold index benchmark.
+
+    Without this correction, a savings-plan portfolio (regular monthly buys)
+    would appear to massively outperform any index simply because new cash
+    is being added, not because the holdings are performing better.
+
+    Method: Modified Dietz / daily TWR
+      - Track actual positions and daily market value
+      - Also track cumulative cash invested (cost basis of current positions)
+      - Normalise: value(t) / cost_invested(t) × 100, rebased at first purchase
     """
     if not portfolio.all_holdings():
         return None, "No holdings in portfolio."
 
-    all_tickers = list(portfolio.holdings.keys())
+    all_tickers = [h.ticker for h in portfolio.all_holdings()]  # only active holdings
     close, err  = _download_close(all_tickers, start_date.strftime("%Y-%m-%d"))
     if close is None:
         return None, err
 
-    # Warn about tickers we couldn't get data for (but continue)
     missing = [t for t in all_tickers if t.upper() not in close.columns]
 
-    txns: List[Tuple[date, str, str, float]] = sorted(
-        [(datetime.strptime(t.date, "%Y-%m-%d").date(), ticker, t.action, t.quantity)
+    # Build sorted transaction list: (date, ticker, action, qty, price)
+    txns: List[Tuple[date, str, str, float, float]] = sorted(
+        [(datetime.strptime(t.date, "%Y-%m-%d").date(),
+          ticker, t.action, t.quantity, t.price)
          for ticker, holding in portfolio.holdings.items()
          for t in holding.transactions],
         key=lambda x: x[0]
     )
 
-    positions: Dict[str, float] = {t.upper(): 0.0 for t in all_tickers}
+    positions:     Dict[str, float] = {t.upper(): 0.0 for t in all_tickers}
+    cost_invested: float            = 0.0   # cumulative net cash put in
     txn_idx, n_txns = 0, len(txns)
-    values = []
+    values       = []
+    cost_series  = []
 
     for dt in close.index:
         dt_date = dt.date()
+
+        # Apply all transactions up to and including this date
         while txn_idx < n_txns and txns[txn_idx][0] <= dt_date:
-            _, ticker, action, qty = txns[txn_idx]
+            _, ticker, action, qty, price = txns[txn_idx]
             key = ticker.upper()
-            positions[key] = positions.get(key, 0) + (qty if action == "buy" else -qty)
+            if action == "buy":
+                positions[key]  = positions.get(key, 0) + qty
+                cost_invested  += qty * price
+            else:
+                positions[key]  = positions.get(key, 0) - qty
+                cost_invested  -= qty * price   # reduce basis on sell
             txn_idx += 1
 
         total = sum(
             qty * float(close.loc[dt, ticker])
             for ticker, qty in positions.items()
-            if qty > 0 and ticker in close.columns and pd.notna(close.loc[dt, ticker])
+            if qty > 0 and ticker in close.columns
+            and pd.notna(close.loc[dt, ticker])
         )
         values.append(total)
+        cost_series.append(max(cost_invested, 0.0))
 
-    series  = pd.Series(values, index=close.index, name="Portfolio")
-    nonzero = series[series > 0].index
+    raw_series  = pd.Series(values,      index=close.index, name="Portfolio")
+    cost_series = pd.Series(cost_series, index=close.index)
+
+    # Only keep dates where we actually hold something
+    nonzero = raw_series[raw_series > 0].index
     if not len(nonzero):
         return None, "Portfolio value series is all zeros — check your transaction prices."
 
+    raw_series  = raw_series[nonzero[0]:]
+    cost_series = cost_series[nonzero[0]:]
+
+    # Time-weighted: value / cost_invested, then ×100 to rebase at 100
+    # This removes the effect of cash inflows so performance is comparable to an index
+    twr = (raw_series / cost_series.clip(lower=1)) * 100
+
     warn = f"No historical data for: {', '.join(missing)}" if missing else None
-    return series[nonzero[0]:], warn
+    return twr, warn
 
 
 def fetch_index_series(ticker: str, start_date: date) -> Tuple[Optional[pd.Series], Optional[str]]:
