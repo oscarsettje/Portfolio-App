@@ -1120,14 +1120,14 @@ def render_holdings():
                 "Notes", value=current_notes, height=100,
                 placeholder="Investment thesis, reminders, links…",
                 label_visibility="collapsed", key=f"notes_{h.ticker}")
-            if new_notes != current_notes:
-                if st.button("💾  Save note", key=f"save_notes_{h.ticker}"):
-                    try:
-                        db().set_holding_notes(st.session_state.user_id, h.ticker, new_notes)
-                        st.success("✓ Saved")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to save note: {e}")
+            if st.button("💾  Save note", key=f"save_notes_{h.ticker}",
+                         disabled=(new_notes == current_notes)):
+                try:
+                    db().set_holding_notes(st.session_state.user_id, h.ticker, new_notes)
+                    st.success("✓ Saved")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to save note: {e}")
 
 
 def _chart_price_history(ticker: str, period: str, transactions=None):
